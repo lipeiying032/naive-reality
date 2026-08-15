@@ -193,7 +193,7 @@ new file mode 100644
 index 0000000..ec50250
 --- /dev/null
 +++ b/ssl/reality.cc
-@@ -0,0 +1,238 @@
+@@ -0,0 +1,236 @@
 +// Copyright 2025 The BoringSSL Authors
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
@@ -359,12 +359,10 @@ index 0000000..ec50250
 +    return 0;
 +  }
 +  static const uint16_t kX25519 = SSL_GROUP_X25519;
-+  static const uint8_t kH2Alpn[] = {2, 'h', '2'};
 +  if (!SSL_set_min_proto_version(ssl, TLS1_3_VERSION) ||
 +      !SSL_set_max_proto_version(ssl, TLS1_3_VERSION) ||
 +      !SSL_set1_group_ids(ssl, &kX25519, 1) ||
-+      !SSL_set1_client_key_shares(ssl, &kX25519, 1) ||
-+      SSL_set_alpn_protos(ssl, kH2Alpn, sizeof(kH2Alpn)) != 0) {
++      !SSL_set1_client_key_shares(ssl, &kX25519, 1)) {
 +    return 0;
 +  }
 +  SSL_set_options(ssl, SSL_OP_NO_TICKET);
