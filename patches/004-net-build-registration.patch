@@ -1,0 +1,13 @@
+diff --git a/net/BUILD.gn b/net/BUILD.gn
+index ddc21d4..4becaa4 100644
+--- a/net/BUILD.gn
++++ b/net/BUILD.gn
+@@ -1014,6 +1014,8 @@ component("net") {
+     "socket/ssl_client_socket_impl.h",
+     "socket/ssl_connect_job.cc",
+     "socket/ssl_connect_job.h",
++    "socket/reality_config.cc",
++    "socket/reality_config.h",
+     "socket/ssl_server_socket.h",
+     "socket/ssl_server_socket_impl.cc",
+     "socket/ssl_server_socket_impl.h",

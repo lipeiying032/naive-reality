@@ -1,0 +1,202 @@
+name: Build Kernel
+
+# This repository contains the REALITY patches (patches/) and Go components;
+# the naiveproxy kernel source itself lives upstream. CI clones upstream at
+# the pinned version (CHROMIUM_VERSION), applies patches/001-004, and builds.
+on:
+  push:
+    branches: [main, master]
+    paths: ["patches/**", "tests/**", "CHROMIUM_VERSION", ".github/workflows/build-kernel.yml"]
+  pull_request:
+    paths: ["patches/**", "tests/**", "CHROMIUM_VERSION", ".github/workflows/build-kernel.yml"]
+  workflow_dispatch:
+  release:
+    types: [published]
+
+env:
+  CACHE_EPOCH: 1
+  CCACHE_MAXSIZE: 200M
+  CCACHE_MAXFILES: 0
+  SCCACHE_CACHE_SIZE: 200M
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    env:
+      EXTRA_FLAGS: 'target_cpu="${{ matrix.arch }}"'
+      BUNDLE: naivereal-${{ github.event.release.tag_name || 'kernel' }}-${{ github.job }}-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch upstream naiveproxy source
+        run: |
+          git clone --depth 1 https://github.com/klzgrad/naiveproxy.git upstream
+          echo "upstream commit: $(git -C upstream rev-parse HEAD)"
+          test "$(cat CHROMIUM_VERSION)" = "$(cat upstream/CHROMIUM_VERSION)"
+      - name: Apply REALITY patches (net + spider + build registration)
+        run: |
+          for p in 002-net-reality-plumbing 003-spider-mode 004-net-build-registration; do
+            git -C upstream/src apply "$GITHUB_WORKSPACE/patches/$p.patch"
+          done
+      - name: Apply BoringSSL REALITY patch
+        run: |
+          test -d upstream/src/third_party/boringssl/src
+          git -C upstream/src/third_party/boringssl/src apply "$GITHUB_WORKSPACE/patches/001-boringssl-reality.patch"
+      - name: Cache toolchains (Linux)
+        uses: actions/cache@v4
+        with:
+          path: |
+            upstream/src/third_party/llvm-build/Release+Asserts/
+            upstream/src/gn/
+          key: toolchains-posix-${{ hashFiles('CHROMIUM_VERSION') }}-v${{ env.CACHE_EPOCH }}
+      - name: Cache PGO (Linux)
+        uses: actions/cache@v4
+        with:
+          path: upstream/src/chrome/build/pgo_profiles/
+          key: pgo-linux-${{ hashFiles('CHROMIUM_VERSION') }}-v${{ env.CACHE_EPOCH }}
+      - name: Regenerate Debian keyring
+        working-directory: upstream/src
+        run: |
+          rm -f ./build/linux/sysroot_scripts/keyring.gpg
+          GPG_TTY=/dev/null ./build/linux/sysroot_scripts/generate_keyring.sh
+      - name: Cache sysroot
+        uses: actions/cache@v4
+        with:
+          path: |
+            upstream/src/out/sysroot-build/bullseye/bullseye_*
+            upstream/src/out/sysroot-build/trixie/trixie_*
+            upstream/src/out/sysroot-build/sid/sid_*
+          key: sysroot-linux-${{ matrix.arch }}-${{ hashFiles('CHROMIUM_VERSION') }}-v${{ env.CACHE_EPOCH }}
+      - id: ccache-timestamp
+        run: echo "CCACHE_TIMESTAMP=$(date +%s)" >>$GITHUB_OUTPUT
+      - name: Cache ccache files
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-linux-${{ matrix.arch }}-${{ hashFiles('CHROMIUM_VERSION') }}-${{ steps.ccache-timestamp.outputs.CCACHE_TIMESTAMP }}
+          restore-keys: ccache-linux-${{ matrix.arch }}-${{ hashFiles('CHROMIUM_VERSION') }}-
+      - name: Install APT packages
+        run: |
+          sudo apt update
+          sudo apt install ninja-build pkg-config ccache bubblewrap
+      - name: Build
+        working-directory: upstream/src
+        run: |
+          ./get-clang.sh
+          ccache -z
+          ./build.sh
+          ccache -s && ccache --evict-older-than 1d
+      - name: Basic test
+        working-directory: upstream/src
+        run: ../tests/basic.sh out/Release/naive
+      - name: Pack naivereal assets
+        working-directory: upstream/src
+        run: |
+          mkdir ${{ env.BUNDLE }}
+          cp out/Release/naive ../config.json ../LICENSE ../USAGE.txt ${{ env.BUNDLE }}
+          tar cJf ${{ env.BUNDLE }}.tar.xz ${{ env.BUNDLE }}
+          openssl sha256 out/Release/naive >sha256sum.txt
+          echo "SHA256SUM=$(cut -d' ' -f2 sha256sum.txt)" >>$GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ matrix.arch }}
+          path: upstream/src/${{ env.BUNDLE }}.tar.xz
+      - name: Upload naivereal assets
+        if: ${{ github.event_name == 'release' }}
+        run: gh release upload "${GITHUB_REF##*/}" ${{ env.BUNDLE }}.tar.xz --clobber
+        working-directory: upstream/src
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  windows:
+    runs-on: windows-2022
+    env:
+      EXTRA_FLAGS: 'target_cpu="x64"'
+      BUNDLE: naivereal-${{ github.event.release.tag_name || 'kernel' }}-${{ github.job }}-x64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch upstream naiveproxy source
+        run: |
+          git clone --depth 1 https://github.com/klzgrad/naiveproxy.git upstream
+          test "$(cat CHROMIUM_VERSION)" = "$(cat upstream/CHROMIUM_VERSION)"
+      - name: Apply REALITY patches
+        run: |
+          for p in 002-net-reality-plumbing 003-spider-mode 004-net-build-registration; do
+            git -C upstream/src apply "$GITHUB_WORKSPACE/patches/$p.patch"
+          done
+          git -C upstream/src/third_party/boringssl/src apply "$GITHUB_WORKSPACE/patches/001-boringssl-reality.patch"
+      - name: Cache toolchains
+        uses: actions/cache@v4
+        with:
+          path: |
+            upstream/src/third_party/llvm-build/Release+Asserts/
+            upstream/src/gn/
+            ~/.cargo/bin/
+            ~/bin/ninja.exe
+          key: toolchains-win-${{ hashFiles('CHROMIUM_VERSION') }}-v${{ env.CACHE_EPOCH }}
+      - name: Cache PGO (win64)
+        uses: actions/cache@v4
+        with:
+          path: upstream/src/chrome/build/pgo_profiles/chrome-win64-*
+          key: pgo-win64-${{ hashFiles('CHROMIUM_VERSION') }}-v${{ env.CACHE_EPOCH }}
+      - id: ccache-timestamp
+        run: echo "CCACHE_TIMESTAMP=$(date +%s)" >>$GITHUB_OUTPUT
+      - name: Cache ccache files
+        uses: actions/cache@v4
+        with:
+          path: ~/AppData/Local/Mozilla/sccache
+          key: ccache-win-x64-${{ hashFiles('CHROMIUM_VERSION') }}-${{ steps.ccache-timestamp.outputs.CCACHE_TIMESTAMP }}
+          restore-keys: ccache-win-x64-${{ hashFiles('CHROMIUM_VERSION') }}-
+      - name: Build
+        working-directory: upstream/src
+        run: |
+          ./get-clang.sh
+          ~/.cargo/bin/sccache -z
+          ./build.sh
+          ~/.cargo/bin/sccache -s
+      - name: Basic test
+        working-directory: upstream/src
+        run: ../tests/basic.sh out/Release/naive
+      - name: Pack naivereal assets
+        working-directory: upstream/src
+        run: |
+          mkdir ${{ env.BUNDLE }}
+          cp out/Release/naive ../config.json ../LICENSE ../USAGE.txt ${{ env.BUNDLE }}
+          7z a ${{ env.BUNDLE }}.zip ${{ env.BUNDLE }}
+          openssl sha256 out/Release/naive.exe >sha256sum.txt
+          echo "SHA256SUM=$(cut -d' ' -f2 sha256sum.txt)" >>$GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel-windows-x64
+          path: upstream/src/${{ env.BUNDLE }}.zip
+      - name: Upload naivereal assets
+        if: ${{ github.event_name == 'release' }}
+        run: gh release upload "${GITHUB_REF##*/}" ${{ env.BUNDLE }}.zip --clobber
+        working-directory: upstream/src
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  reality-e2e:
+    # REALITY full-chain test: patched kernel (client, reality flags) ->
+    # naivereal-frontend (reality mode) -> official naive server -> internet.
+    needs: linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - uses: actions/download-artifact@v4
+        with:
+          name: kernel-x64
+          path: /tmp/kernel-artifact
+      - name: Extract kernel
+        run: |
+          mkdir -p /tmp/kernel
+          tar xf /tmp/kernel-artifact/*.tar.xz -C /tmp/kernel --strip-components=1
+          ls -la /tmp/kernel
+      - name: REALITY full-chain e2e
+        run: bash tests/ci-reality-e2e.sh /tmp/kernel

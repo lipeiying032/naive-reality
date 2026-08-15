@@ -1,0 +1,41 @@
+name: go
+
+on:
+  push:
+    paths: ["frontend/**", "tui/**", "tests/**", ".github/workflows/go.yml"]
+  pull_request:
+    paths: ["frontend/**", "tui/**", "tests/**", ".github/workflows/go.yml"]
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - name: Test frontend
+        working-directory: frontend
+        run: go test -race ./...
+      - name: Build frontend
+        working-directory: frontend
+        run: go build ./...
+      - name: Test tui
+        working-directory: tui
+        run: go test ./...
+      - name: Build tui
+        working-directory: tui
+        run: go build ./...
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - name: Full chain e2e (official naive server + frontend + official client)
+        run: bash tests/ci-e2e.sh

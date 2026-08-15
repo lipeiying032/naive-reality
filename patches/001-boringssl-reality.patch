@@ -1,0 +1,473 @@
+diff --git a/build.json b/build.json
+index 358a8c3..d773686 100644
+--- a/build.json
++++ b/build.json
+@@ -709,6 +709,7 @@
+             "ssl/handshake.cc",
+             "ssl/handshake_client.cc",
+             "ssl/handshake_server.cc",
++            "ssl/reality.cc",
+             "ssl/s3_both.cc",
+             "ssl/s3_lib.cc",
+             "ssl/s3_pkt.cc",
+@@ -744,7 +745,8 @@
+             "include/openssl/tls1.h"
+         ],
+         "internal_hdrs": [
+-            "ssl/internal.h"
++            "ssl/internal.h",
++            "ssl/reality.h"
+         ]
+     },
+     "decrepit": {
+diff --git a/gen/sources.bzl b/gen/sources.bzl
+index 8b57aa8..5acac6e 100644
+--- a/gen/sources.bzl
++++ b/gen/sources.bzl
+@@ -2921,6 +2921,7 @@ ssl_sources = [
+     "ssl/handshake.cc",
+     "ssl/handshake_client.cc",
+     "ssl/handshake_server.cc",
++    "ssl/reality.cc",
+     "ssl/s3_both.cc",
+     "ssl/s3_lib.cc",
+     "ssl/s3_pkt.cc",
+@@ -2958,6 +2959,7 @@ ssl_headers = [
+ 
+ ssl_internal_headers = [
+     "ssl/internal.h",
++    "ssl/reality.h",
+ ]
+ 
+ ssl_test_sources = [
+diff --git a/gen/sources.cmake b/gen/sources.cmake
+index 9acba30..c6f1ebe 100644
+--- a/gen/sources.cmake
++++ b/gen/sources.cmake
+@@ -2989,6 +2989,7 @@ set(
+   ssl/handshake.cc
+   ssl/handshake_client.cc
+   ssl/handshake_server.cc
++  ssl/reality.cc
+   ssl/s3_both.cc
+   ssl/s3_lib.cc
+   ssl/s3_pkt.cc
+@@ -3030,6 +3031,7 @@ set(
+   SSL_INTERNAL_HEADERS
+ 
+   ssl/internal.h
++  ssl/reality.h
+ )
+ 
+ set(
+diff --git a/gen/sources.gni b/gen/sources.gni
+index 8b13bb5..59a3fcc 100644
+--- a/gen/sources.gni
++++ b/gen/sources.gni
+@@ -2921,6 +2921,7 @@ ssl_sources = [
+   "ssl/handshake.cc",
+   "ssl/handshake_client.cc",
+   "ssl/handshake_server.cc",
++  "ssl/reality.cc",
+   "ssl/s3_both.cc",
+   "ssl/s3_lib.cc",
+   "ssl/s3_pkt.cc",
+@@ -2958,6 +2959,7 @@ ssl_headers = [
+ 
+ ssl_internal_headers = [
+   "ssl/internal.h",
++  "ssl/reality.h",
+ ]
+ 
+ ssl_test_sources = [
+diff --git a/gen/sources.mk b/gen/sources.mk
+index fa0b051..b0145e7 100644
+--- a/gen/sources.mk
++++ b/gen/sources.mk
+@@ -2888,6 +2888,7 @@ boringssl_ssl_sources := \
+   ssl/handshake.cc \
+   ssl/handshake_client.cc \
+   ssl/handshake_server.cc \
++  ssl/reality.cc \
+   ssl/s3_both.cc \
+   ssl/s3_lib.cc \
+   ssl/s3_pkt.cc \
+@@ -2922,7 +2923,8 @@ boringssl_ssl_headers := \
+   include/openssl/tls1.h
+ 
+ boringssl_ssl_internal_headers := \
+-  ssl/internal.h
++  ssl/internal.h \
++  ssl/reality.h
+ 
+ boringssl_ssl_test_sources := \
+   crypto/test/gtest_main.cc \
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index 0b91e5d..c016dcb 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -2763,6 +2763,34 @@ OPENSSL_EXPORT int SSL_set1_client_key_shares(SSL *ssl,
+ OPENSSL_EXPORT int SSL_set1_server_supported_groups_hint(
+     SSL *ssl, const uint16_t *server_groups, size_t num_server_groups);
+ 
++// REALITY client mode (experimental).
++//
++// SSL_set1_reality_config configures |ssl| to use the REALITY protocol
++// (https://github.com/XTLS/REALITY) for its outbound handshake. |public_key|
++// is the server's static X25519 public key (32 bytes) and |short_id| is the
++// right-zero-padded 8-byte short id. When set, the client restricts the
++// handshake to TLS 1.3, restricts key shares to X25519, offers only the h2
++// ALPN protocol, disables session tickets/PSK, and replaces the legacy session
++// id in the ClientHello with an authenticated-encryption blob. It returns one
++// on success and zero on failure (including when |ssl| is a server).
++OPENSSL_EXPORT int SSL_set1_reality_config(SSL *ssl,
++                                           const uint8_t public_key[32],
++                                           const uint8_t short_id[8]);
++
++// SSL_clear_reality_config disables REALITY mode on |ssl| and clears any
++// derived key material.
++OPENSSL_EXPORT void SSL_clear_reality_config(SSL *ssl);
++
++// SSL_reality_verify_certificate checks whether the peer's leaf certificate
++// (|leaf_der|/|leaf_der_len|) is the REALITY server's self-signed Ed25519
++// certificate. It returns one when REALITY is configured on |ssl| and the
++// leaf's Ed25519 public key matches HMAC-SHA512(AuthKey, public_key) against
++// the certificate signature; otherwise it returns zero. The caller should use
++// it to skip normal chain verification when it returns one.
++OPENSSL_EXPORT int SSL_reality_verify_certificate(SSL *ssl,
++                                                  const uint8_t *leaf_der,
++                                                  size_t leaf_der_len);
++
+ 
+ // Certificate verification.
+ //
+diff --git a/ssl/handshake_client.cc b/ssl/handshake_client.cc
+index 7ab6d2c..2f59cb7 100644
+--- a/ssl/handshake_client.cc
++++ b/ssl/handshake_client.cc
+@@ -39,6 +39,7 @@
+ #include "../crypto/bytestring/internal.h"
+ #include "../crypto/internal.h"
+ #include "internal.h"
++#include "reality.h"
+ 
+ 
+ BSSL_NAMESPACE_BEGIN
+@@ -232,6 +233,13 @@ bool ssl_add_client_hello(SSL_HANDSHAKE *hs) {
+     return false;
+   }
+ 
++  // REALITY: patch the legacy session id with the encrypted REALITY blob. The
++  // transcript and wire bytes are produced by add_message below, so patching
++  // here ensures the patched hello is what is hashed and sent.
++  if (!ssl_reality_patch_client_hello(hs, msg)) {
++    return false;
++  }
++
+   return ssl->method->add_message(ssl, std::move(msg));
+ }
+ 
+diff --git a/ssl/internal.h b/ssl/internal.h
+index 85dde3e..6d7f4aa 100644
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -4285,6 +4285,16 @@ struct ssl_st {
+   // server is true iff the this SSL* is the server half. Note: before the SSL*
+   // is initialized by either SSL_set_accept_state or SSL_set_connect_state,
+   // the side is not determined. In this state, server is always false.
++  // REALITY client mode state (see ssl/reality.h). The config fields are set
++  // by SSL_set1_reality_config before the handshake; reality_auth_key is
++  // derived during the ClientHello build and consulted during certificate
++  // verification.
++  bool reality_configured = false;
++  uint8_t reality_public_key[32] = {0};
++  uint8_t reality_short_id[8] = {0};
++  bool reality_auth_key_set = false;
++  uint8_t reality_auth_key[32] = {0};
++
+   bool server : 1;
+ 
+   // quiet_shutdown is true if the connection should not send a close_notify on
+diff --git a/ssl/reality.cc b/ssl/reality.cc
+new file mode 100644
+index 0000000..ec50250
+--- /dev/null
++++ b/ssl/reality.cc
+@@ -0,0 +1,236 @@
++// Copyright 2025 The BoringSSL Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     https://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++#include <openssl/ssl.h>
++
++#include <string.h>
++#include <time.h>
++
++#include <openssl/aead.h>
++#include <openssl/bytestring.h>
++#include <openssl/curve25519.h>
++#include <openssl/digest.h>
++#include <openssl/err.h>
++#include <openssl/evp.h>
++#include <openssl/hkdf.h>
++#include <openssl/hmac.h>
++#include <openssl/mem.h>
++#include <openssl/x509.h>
++
++#include "../crypto/internal.h"
++#include "internal.h"
++#include "reality.h"
++
++namespace bssl {
++namespace {
++
++// The REALITY client version, encoded as three bytes (major.minor.patch).
++// Matches the reference Go client (frontend/internal/realitytest) that passed
++// interop with the xtls/reality server fork: version 1.0.0 = {1, 0, 0}. This is
++// NOT the TLS version.
++static const uint8_t kRealityClientVersion[3] = {1, 0, 0};
++
++// reality_derive_auth_key computes the REALITY AuthKey
++//   HKDF-SHA256(X25519(client_ephemeral_private, server_static_public),
++//               salt=client_random[0:20], info="REALITY")
++// from the X25519 key share and writes it to |out_key|.
++bool reality_derive_auth_key(SSL_HANDSHAKE *hs, uint8_t out_key[32]) {
++  SSL *const ssl = hs->ssl;
++  uint8_t private_key[32];
++  bool found = false;
++  for (const auto &key_share : hs->key_shares) {
++    if (key_share->GroupID() != SSL_GROUP_X25519) {
++      continue;
++    }
++    ScopedCBB cbb;
++    if (!CBB_init(cbb.get(), 32) ||
++        !key_share->SerializePrivateKey(cbb.get())) {
++      return false;
++    }
++    const uint8_t *data;
++    size_t len;
++    if (!CBB_finish(cbb.get(), &data, &len) || len != 32) {
++      return false;
++    }
++    OPENSSL_memcpy(private_key, data, sizeof(private_key));
++    found = true;
++    break;
++  }
++  if (!found) {
++    OPENSSL_PUT_ERROR(SSL, ERR_R_INTERNAL_ERROR);
++    return false;
++  }
++
++  uint8_t shared[32];
++  if (!X25519(shared, private_key, ssl->reality_public_key)) {
++    OPENSSL_PUT_ERROR(SSL, ERR_R_INTERNAL_ERROR);
++    return false;
++  }
++
++  static const char kInfo[] = "REALITY";
++  if (!HKDF(out_key, 32, EVP_sha256(), shared, sizeof(shared),
++            ssl->s3->client_random, 20,
++            reinterpret_cast<const uint8_t *>(kInfo), sizeof(kInfo) - 1)) {
++    OPENSSL_PUT_ERROR(SSL, ERR_R_INTERNAL_ERROR);
++    return false;
++  }
++  return true;
++}
++
++// reality_seal_session_id computes the 32-byte REALITY session id blob
++// (AES-256-GCM ciphertext || tag) with nonce client_random[20:32] and AAD
++// |hello| (the serialized ClientHello with a zeroed session id).
++bool reality_seal_session_id(SSL_HANDSHAKE *hs, const uint8_t auth_key[32],
++                             uint8_t out[32], const uint8_t *hello,
++                             size_t hello_len) {
++  SSL *const ssl = hs->ssl;
++  // Plaintext: version(3) | 0x00 reserved | unix_time(4, big-endian) |
++  // short_id(8).
++  uint8_t plaintext[16];
++  OPENSSL_memcpy(plaintext, kRealityClientVersion, 3);
++  plaintext[3] = 0;
++  uint32_t now = static_cast<uint32_t>(time(nullptr));
++  plaintext[4] = static_cast<uint8_t>(now >> 24);
++  plaintext[5] = static_cast<uint8_t>(now >> 16);
++  plaintext[6] = static_cast<uint8_t>(now >> 8);
++  plaintext[7] = static_cast<uint8_t>(now);
++  OPENSSL_memcpy(plaintext + 8, ssl->reality_short_id, 8);
++
++  ScopedEVP_AEAD_CTX aead_ctx;
++  if (!EVP_AEAD_CTX_init(aead_ctx.get(), EVP_aead_aes_256_gcm(), auth_key, 32,
++                         EVP_AEAD_DEFAULT_TAG_LENGTH, nullptr)) {
++    return false;
++  }
++  size_t out_len = 0;
++  if (!EVP_AEAD_CTX_seal(aead_ctx.get(), out, &out_len, 32,
++                         ssl->s3->client_random + 20, 12, plaintext,
++                         sizeof(plaintext), hello, hello_len) ||
++      out_len != 32) {
++    return false;
++  }
++  return true;
++}
++
++}  // namespace
++
++bool ssl_reality_patch_client_hello(SSL_HANDSHAKE *hs, Array<uint8_t> &msg) {
++  SSL *const ssl = hs->ssl;
++  if (!ssl->reality_configured) {
++    return true;
++  }
++  // The legacy session id is at offset 39: 4-byte handshake header, 2-byte
++  // legacy_version, 32-byte random, then the 1-byte session-id length prefix.
++  if (msg.size() < 39 + 32) {
++    OPENSSL_PUT_ERROR(SSL, ERR_R_INTERNAL_ERROR);
++    return false;
++  }
++  OPENSSL_memset(msg.data() + 39, 0, 32);
++
++  uint8_t auth_key[32];
++  if (!reality_derive_auth_key(hs, auth_key)) {
++    return false;
++  }
++
++  uint8_t sealed[32];
++  if (!reality_seal_session_id(hs, auth_key, sealed, msg.data(), msg.size())) {
++    return false;
++  }
++  OPENSSL_memcpy(msg.data() + 39, sealed, sizeof(sealed));
++
++  OPENSSL_memcpy(ssl->reality_auth_key, auth_key, sizeof(auth_key));
++  ssl->reality_auth_key_set = true;
++  return true;
++}
++
++}  // namespace bssl
++
++int SSL_set1_reality_config(SSL *ssl, const uint8_t public_key[32],
++                            const uint8_t short_id[8]) {
++  if (ssl == nullptr || public_key == nullptr || short_id == nullptr ||
++      ssl->server) {
++    return 0;
++  }
++  static const uint16_t kX25519 = SSL_GROUP_X25519;
++  static const uint8_t kH2Alpn[] = {2, 'h', '2'};
++  if (!SSL_set_min_proto_version(ssl, TLS1_3_VERSION) ||
++      !SSL_set_max_proto_version(ssl, TLS1_3_VERSION) ||
++      !SSL_set1_group_ids(ssl, &kX25519, 1) ||
++      !SSL_set1_client_key_shares(ssl, &kX25519, 1) ||
++      !SSL_set_alpn_protos(ssl, kH2Alpn, sizeof(kH2Alpn))) {
++    return 0;
++  }
++  SSL_set_options(ssl, SSL_OP_NO_TICKET);
++
++  OPENSSL_memcpy(ssl->reality_public_key, public_key, 32);
++  OPENSSL_memcpy(ssl->reality_short_id, short_id, 8);
++  ssl->reality_configured = true;
++  ssl->reality_auth_key_set = false;
++  return 1;
++}
++
++void SSL_clear_reality_config(SSL *ssl) {
++  if (ssl == nullptr) {
++    return;
++  }
++  ssl->reality_configured = false;
++  ssl->reality_auth_key_set = false;
++  OPENSSL_cleanse(ssl->reality_public_key, sizeof(ssl->reality_public_key));
++  OPENSSL_cleanse(ssl->reality_short_id, sizeof(ssl->reality_short_id));
++  OPENSSL_cleanse(ssl->reality_auth_key, sizeof(ssl->reality_auth_key));
++}
++
++int SSL_reality_verify_certificate(SSL *ssl, const uint8_t *leaf_der,
++                                   size_t leaf_der_len) {
++  if (ssl == nullptr || leaf_der == nullptr || !ssl->reality_configured ||
++      !ssl->reality_auth_key_set) {
++    return 0;
++  }
++
++  const uint8_t *der = leaf_der;
++  bssl::UniquePtr<X509> x509(d2i_X509(nullptr, &der, (long)leaf_der_len));
++  if (x509 == nullptr) {
++    return 0;
++  }
++
++  bssl::UniquePtr<EVP_PKEY> pkey(X509_get_pubkey(x509.get()));
++  if (pkey == nullptr || EVP_PKEY_id(pkey.get()) != EVP_PKEY_ED25519) {
++    return 0;
++  }
++  uint8_t pub[32];
++  size_t pub_len = sizeof(pub);
++  if (!EVP_PKEY_get_raw_public_key(pkey.get(), pub, &pub_len) ||
++      pub_len != sizeof(pub)) {
++    return 0;
++  }
++
++  const ASN1_BIT_STRING *sig;
++  X509_get0_signature(&sig, nullptr, x509.get());
++  if (sig == nullptr || sig->length != 64) {
++    return 0;
++  }
++
++  // expected = HMAC-SHA512(AuthKey, ed25519_public_key).
++  uint8_t expected[64];
++  unsigned expected_len = 0;
++  bssl::UniquePtr<HMAC_CTX> hmac(HMAC_CTX_new());
++  if (hmac == nullptr ||
++      !HMAC_Init_ex(hmac.get(), ssl->reality_auth_key,
++                    sizeof(ssl->reality_auth_key), EVP_sha512(), nullptr) ||
++      !HMAC_Update(hmac.get(), pub, sizeof(pub)) ||
++      !HMAC_Final(hmac.get(), expected, &expected_len) ||
++      expected_len != sizeof(expected)) {
++    return 0;
++  }
++
++  return CRYPTO_memcmp(expected, sig->data, sizeof(expected)) == 0;
++}
+diff --git a/ssl/reality.h b/ssl/reality.h
+new file mode 100644
+index 0000000..f7794a5
+--- /dev/null
++++ b/ssl/reality.h
+@@ -0,0 +1,34 @@
++// Copyright 2025 The BoringSSL Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     https://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++#ifndef OPENSSL_HEADER_SSL_REALITY_H
++#define OPENSSL_HEADER_SSL_REALITY_H
++
++#include <openssl/base.h>
++
++#include "internal.h"
++
++namespace bssl {
++
++// ssl_reality_patch_client_hello replaces the legacy session id in |msg| (a
++// fully serialized TLS 1.3 ClientHello including the 4-byte handshake header)
++// with the REALITY authenticated-encryption blob. It derives the REALITY
++// AuthKey from the X25519 key share and stores it on |hs->ssl|. It returns
++// true on success and false on error. If REALITY is not configured on
++// |hs->ssl|, it does nothing and returns true.
++bool ssl_reality_patch_client_hello(SSL_HANDSHAKE *hs, Array<uint8_t> &msg);
++
++}  // namespace bssl
++
++#endif  // OPENSSL_HEADER_SSL_REALITY_H

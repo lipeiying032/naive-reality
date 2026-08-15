@@ -1,0 +1,96 @@
+diff --git a/net/tools/naive/naive_proxy.cc b/net/tools/naive/naive_proxy.cc
+index a8a26e0..8c6be70 100644
+--- a/net/tools/naive/naive_proxy.cc
++++ b/net/tools/naive/naive_proxy.cc
+@@ -21,6 +21,7 @@
+ #include "net/proxy_resolution/proxy_config.h"
+ #include "net/proxy_resolution/proxy_list.h"
+ #include "net/socket/client_socket_pool_manager.h"
++#include "net/socket/reality_config.h"
+ #include "net/socket/server_socket.h"
+ #include "net/socket/stream_socket.h"
+ #include "net/tools/naive/http_proxy_server_socket.h"
+@@ -182,7 +183,9 @@ int NaiveProxy::DoPreamble() {
+ }
+ 
+ int NaiveProxy::DoPreambleComplete(int result) {
+-  if (result != OK) {
++  if (result == ERR_REALITY_REAL_TARGET) {
++    DoSpiderMode();
++  } else if (result != OK) {
+     LOG(WARNING) << "Preamble error: " << ErrorToShortString(result);
+     // Preamble error doesn't prevent Connect().
+   }
+@@ -243,6 +246,9 @@ void NaiveProxy::OnConnectComplete(unsigned int connection_id, int result) {
+ }
+ 
+ void NaiveProxy::HandleConnectResult(NaiveConnection* connection, int result) {
++  if (result == ERR_REALITY_REAL_TARGET) {
++    DoSpiderMode();
++  }
+   if (result != OK) {
+     Close(connection->id(), result);
+     return;
+@@ -269,9 +275,38 @@ void NaiveProxy::OnRunComplete(unsigned int connection_id, int result) {
+ }
+ 
+ void NaiveProxy::HandleRunResult(NaiveConnection* connection, int result) {
++  if (result == ERR_REALITY_REAL_TARGET) {
++    DoSpiderMode();
++  }
+   Close(connection->id(), result);
+ }
+ 
++void NaiveProxy::DoSpiderMode() {
++  if (spider_mode_triggered_) {
++    return;
++  }
++  spider_mode_triggered_ = true;
++  LOG(WARNING) << "REALITY: reached real target site, spider mode";
++  // Issue one ordinary-TLS GET to https://<server_name>/ so the client looks
++  // like a normal visitor to the real target, then fail the connection.
++  // REALITY is suspended for the duration of this fetch so it uses ordinary
++  // TLS rather than the REALITY ClientHello.
++  SetRealityConfigSuspended(true);
++  auto getter = std::make_unique<PreambleGetter>(
++      proxy_info_, session_, NetworkAnonymizationKey::CreateTransient(),
++      net_log_);
++  PreambleGetter* getter_ptr = getter.get();
++  getter_ptr->Start(base::BindOnce(&NaiveProxy::OnSpiderComplete,
++                                   weak_ptr_factory_.GetWeakPtr(),
++                                   std::move(getter)));
++}
++
++void NaiveProxy::OnSpiderComplete(std::unique_ptr<PreambleGetter> getter,
++                                  int /*result*/) {
++  SetRealityConfigSuspended(false);
++  // |getter| is destroyed here; the fetch result is deliberately ignored.
++}
++
+ void NaiveProxy::Close(unsigned int connection_id, int reason) {
+   auto it = connection_by_id_.find(connection_id);
+   if (it == connection_by_id_.end()) {
+diff --git a/net/tools/naive/naive_proxy.h b/net/tools/naive/naive_proxy.h
+index 9653489..b50b487 100644
+--- a/net/tools/naive/naive_proxy.h
++++ b/net/tools/naive/naive_proxy.h
+@@ -81,6 +81,10 @@ class NaiveProxy {
+   void OnRunComplete(unsigned int connection_id, int result);
+   void HandleRunResult(NaiveConnection* connection, int result);
+ 
++  // REALITY spider mode: one ordinary GET to the real target site, then fail.
++  void DoSpiderMode();
++  void OnSpiderComplete(std::unique_ptr<PreambleGetter> getter, int result);
++
+   void Close(unsigned int connection_id, int reason);
+ 
+   NaiveConnection* FindConnection(unsigned int connection_id);
+@@ -117,6 +121,8 @@ class NaiveProxy {
+ 
+   std::vector<PaddingType> supported_padding_types_;
+ 
++  bool spider_mode_triggered_ = false;
++
+   base::RepeatingTimer cleanup_timer_;
+ 
+   base::WeakPtrFactory<NaiveProxy> weak_ptr_factory_{this};

@@ -1,0 +1,31 @@
+# naivereal-frontend example configuration
+log_level = "info"
+
+[inbound]
+listen = "0.0.0.0:443"
+mode = "reality"                       # "reality" | "tls"
+
+[inbound.reality]
+private_key = ""                       # REQUIRED: run "naivereal-frontend genkey"
+short_ids = ["0123456789abcdef", ""]   # hex, <=16 chars; "" allowed (zero short id)
+server_names = ["www.microsoft.com"]   # SNIs the client may present
+target = "www.microsoft.com:443"       # unauthenticated traffic is relayed here
+relay_enabled = true
+max_time_diff = 0                      # milliseconds; 0 = disabled
+
+[inbound.tls]                          # used when mode = "tls" (Caddy-style, official naive client compatible)
+cert = "/etc/naivereal/fullchain.pem"
+key  = "/etc/naivereal/privkey.pem"
+
+[upstream]
+addr = "127.0.0.1:8080"                # official naive server (--listen=http://user:pass@127.0.0.1:8080)
+
+[limits]
+max_connections = 1024
+max_relays = 64
+handshake_timeout = "10s"
+idle_timeout = "300s"
+
+[status]
+http = "127.0.0.1:9090"                # optional; GET /stats?token=...
+token = "changeme"
