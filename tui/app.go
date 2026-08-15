@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/atotto/clipboard"
 
@@ -54,51 +54,45 @@ type tickMsg time.Time
 type coreLogMsg string
 
 func newModel() model {
-	store, err := config.Load()
-	if err != nil {
-		return model{state: "error", err: fmt.Sprintf("load config: %v", err)}
-	}
 	ti := textinput.New()
 	ti.Placeholder = "paste share link (naive+https:// or naivereal://)"
 	ti.Width = 70
-	return model{
-		store: store,
+	m := model{
+		store: &config.Store{},
 		core:  coremgr.NewManager(),
 		stats: &stats.Stats{},
 		state: "disconnected",
 		input: ti,
 	}
+	store, err := config.Load()
+	if err != nil {
+		m.state = "error"
+		m.err = fmt.Sprintf("load config: %v", err)
+		return m
+	}
+	m.store = store
+	return m
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(m.tick(), m.drainLogs())
+	return tea.Batch(m.tick(), m.waitLog(), m.waitExit())
 }
 
 func (m model) tick() tea.Cmd {
 	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
-func (m model) drainLogs() tea.Cmd {
+func (m model) waitLog() tea.Cmd {
 	return func() tea.Msg {
-		select {
-		case line := <-m.core.Logs:
-			return coreLogMsg(line)
-		default:
-			return coreLogMsg("")
-		}
+		return coreLogMsg(<-m.core.Logs)
 	}
 }
 
 type coreExitMsg string
 
-func (m model) drainExits() tea.Cmd {
+func (m model) waitExit() tea.Cmd {
 	return func() tea.Msg {
-		select {
-		case reason := <-m.core.Exits:
-			return coreExitMsg(reason)
-		default:
-			return coreExitMsg("")
-		}
+		return coreExitMsg(<-m.core.Exits)
 	}
 }
 
@@ -161,7 +155,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case tickMsg:
-		return m, tea.Batch(m.tick(), m.drainLogs(), m.drainExits())
+		return m, m.tick()
 	case coreExitMsg:
 		if msg != "" {
 			if m.state == "connected" || m.state == "connecting" {
@@ -172,7 +166,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.logs = m.logs[len(m.logs)-200:]
 			}
 		}
-		return m, m.drainExits()
+		return m, m.waitExit()
 	case coreLogMsg:
 		if msg != "" {
 			m.logs = append(m.logs, string(msg))
@@ -180,7 +174,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.logs = m.logs[len(m.logs)-200:]
 			}
 		}
-		return m, m.drainLogs()
+		return m, m.waitLog()
 	}
 	return m, nil
 }

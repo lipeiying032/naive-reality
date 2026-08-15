@@ -6,11 +6,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"golang.zx2c4.com/wireguard/tun"
 	"gvisor.dev/gvisor/pkg/buffer"
@@ -71,6 +72,28 @@ func Create(cfg Config) (*Device, error) {
 	}
 	if cfg.MTU == 0 {
 		cfg.MTU = 1500
+	}
+	if cfg.MTU < 576 || cfg.MTU > 65535 {
+		return nil, fmt.Errorf("tun: invalid MTU %d", cfg.MTU)
+	}
+	gateway := net.ParseIP(cfg.Gateway)
+	if gateway == nil || gateway.To4() == nil {
+		return nil, fmt.Errorf("tun: gateway %q must be an IPv4 address", cfg.Gateway)
+	}
+	if _, subnet, err := net.ParseCIDR(cfg.Subnet); err != nil {
+		return nil, fmt.Errorf("parse subnet %q: %w", cfg.Subnet, err)
+	} else if subnet.IP.To4() == nil {
+		return nil, fmt.Errorf("subnet %q must be IPv4", cfg.Subnet)
+	} else if !subnet.Contains(gateway) {
+		return nil, fmt.Errorf("tun: gateway %q is outside subnet %q", cfg.Gateway, cfg.Subnet)
+	}
+	if _, _, err := parseCIDR(cfg.Subnet); err != nil {
+		return nil, err
+	}
+	for _, ip := range cfg.ExcludeIP {
+		if parsed := net.ParseIP(ip); parsed == nil || parsed.To4() == nil {
+			return nil, fmt.Errorf("tun: excluded address %q must be IPv4", ip)
+		}
 	}
 	dev, err := tun.CreateTUN("naivereal", cfg.MTU)
 	if err != nil {
@@ -141,7 +164,11 @@ func parseCIDR(cidr string) (tcpip.Address, tcpip.Subnet, error) {
 	if err != nil {
 		return tcpip.Address{}, tcpip.Subnet{}, fmt.Errorf("parse subnet %q: %w", cidr, err)
 	}
-	addr := tcpip.AddrFrom4Slice(ip.To4())
+	v4 := ip.To4()
+	if v4 == nil {
+		return tcpip.Address{}, tcpip.Subnet{}, fmt.Errorf("subnet %q must be IPv4", cidr)
+	}
+	addr := tcpip.AddrFrom4Slice(v4)
 	subnet, err := tcpip.NewSubnet(addr, tcpip.MaskFromBytes(ipnet.Mask))
 	if err != nil {
 		return tcpip.Address{}, tcpip.Subnet{}, err
@@ -161,14 +188,13 @@ func (d *Device) handleTCP(r *tcp.ForwarderRequest) {
 	conn := gonet.NewTCPConn(&wq, ep)
 	go func() {
 		defer conn.Close()
-		ctx, cancel := context.WithTimeout(d.ctx, 15*time.Second)
-		defer cancel()
-		up, err := d.cfg.Dial("tcp", fmt.Sprintf("%s:%d", id.LocalAddress, id.LocalPort))
+		target := net.JoinHostPort(id.LocalAddress.String(), strconv.Itoa(int(id.LocalPort)))
+		up, err := d.cfg.Dial("tcp", target)
 		if err != nil {
 			return
 		}
 		defer up.Close()
-		splice(ctx, conn, up)
+		splice(d.ctx, conn, up)
 	}()
 }
 
@@ -214,13 +240,17 @@ func (d *Device) startPumps() {
 			if err != nil {
 				return
 			}
-			if n == 0 {
-				continue
+			for i := 0; i < n; i++ {
+				data, protocol, ok := inboundPacket(bufs[i], sizes[i])
+				if !ok {
+					continue
+				}
+				pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
+					Payload: buffer.MakeWithData(data),
+				})
+				d.ep.InjectInbound(protocol, pkt)
+				pkt.DecRef()
 			}
-			pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-				Payload: buffer.MakeWithData(bufs[0][:n]),
-			})
-			d.ep.InjectInbound(header.IPv4ProtocolNumber, pkt)
 		}
 	}()
 	go func() {
@@ -242,12 +272,23 @@ func (d *Device) startPumps() {
 	}()
 }
 
+func inboundPacket(buf []byte, size int) ([]byte, tcpip.NetworkProtocolNumber, bool) {
+	if size <= 0 || size > len(buf) {
+		return nil, 0, false
+	}
+	switch buf[0] >> 4 {
+	case 4:
+		return buf[:size], header.IPv4ProtocolNumber, true
+	case 6:
+		return buf[:size], header.IPv6ProtocolNumber, true
+	default:
+		return nil, 0, false
+	}
+}
+
 // setupRoutes assigns the gateway address to the wintun interface and adds
 // split-default routes, excluding the server IPs via the physical gateway.
 func (d *Device) setupRoutes() error {
-	if net.ParseIP(d.cfg.Gateway) == nil {
-		return fmt.Errorf("invalid gateway %q", d.cfg.Gateway)
-	}
 	_, ipnet, err := net.ParseCIDR(d.cfg.Subnet)
 	if err != nil {
 		return err
@@ -264,9 +305,12 @@ func (d *Device) setupRoutes() error {
 		return err
 	}
 	phyGW := physicalGateway()
+	if len(d.cfg.ExcludeIP) > 0 && phyGW == "" {
+		return fmt.Errorf("cannot determine physical default gateway for proxy-server exclusions")
+	}
 	for _, ip := range d.cfg.ExcludeIP {
-		if phyGW != "" {
-			run("route", "add", ip, "mask", "255.255.255.255", phyGW, "metric", "5")
+		if err := run("route", "add", ip, "mask", "255.255.255.255", phyGW, "metric", "5"); err != nil {
+			return err
 		}
 	}
 	for _, cidr := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
@@ -321,35 +365,24 @@ func (d *Device) Close() error {
 func splice(ctx context.Context, a, b net.Conn) {
 	done := make(chan struct{}, 2)
 	go func() {
-		copyUntil(ctx, b, a)
+		_, _ = io.Copy(b, a)
 		done <- struct{}{}
 	}()
 	go func() {
-		copyUntil(ctx, a, b)
+		_, _ = io.Copy(a, b)
 		done <- struct{}{}
 	}()
-	<-done
+	completed := 0
+	select {
+	case <-ctx.Done():
+	case <-done:
+		completed = 1
+	}
 	b.Close()
 	a.Close()
-}
-
-func copyUntil(ctx context.Context, dst, src net.Conn) {
-	go func() {
-		<-ctx.Done()
-		src.SetDeadline(time.Now())
-		dst.SetDeadline(time.Now())
-	}()
-	buf := make([]byte, 32*1024)
-	for {
-		n, err := src.Read(buf)
-		if n > 0 {
-			if _, werr := dst.Write(buf[:n]); werr != nil {
-				return
-			}
-		}
-		if err != nil {
-			return
-		}
+	for completed < 2 {
+		<-done
+		completed++
 	}
 }
 

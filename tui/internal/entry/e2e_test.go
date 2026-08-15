@@ -2,7 +2,6 @@ package entry
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -23,6 +22,16 @@ import (
 // findNaiveExe locates the official naive.exe test binary near the repo.
 func findNaiveExe(t *testing.T) string {
 	t.Helper()
+	if candidate := os.Getenv("NAIVE_TEST_EXE"); candidate != "" {
+		path, err := filepath.Abs(candidate)
+		if err != nil {
+			t.Fatalf("resolve NAIVE_TEST_EXE: %v", err)
+		}
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path
+		}
+		t.Fatalf("NAIVE_TEST_EXE does not name a file: %s", path)
+	}
 	dir, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -38,7 +47,10 @@ func findNaiveExe(t *testing.T) string {
 		}
 		dir = parent
 	}
-	t.Skip("naive.exe not found near repo (tools/naive-win)")
+	if os.Getenv("NAIVEREAL_REQUIRE_CORE_E2E") == "1" {
+		t.Fatal("naive.exe not found while NAIVEREAL_REQUIRE_CORE_E2E=1")
+	}
+	t.Skip("naive.exe not found near repo (set NAIVE_TEST_EXE to require this test)")
 	return ""
 }
 
@@ -147,5 +159,4 @@ func TestDataPathWithOfficialCore(t *testing.T) {
 	if st.UpBytes.Load() == 0 || st.DownBytes.Load() == 0 {
 		t.Errorf("stats not counting: up=%d down=%d", st.UpBytes.Load(), st.DownBytes.Load())
 	}
-	_ = fmt.Sprintf
 }

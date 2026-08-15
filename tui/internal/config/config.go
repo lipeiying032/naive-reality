@@ -43,10 +43,10 @@ type Profile struct {
 // TUNConfig controls TUN mode for a profile.
 type TUNConfig struct {
 	Enabled   bool     "json:\"enabled\""
-	Gateway   string   "json:\"gateway,omitempty\""   // e.g. 198.18.0.1
-	Subnet    string   "json:\"subnet,omitempty\""    // e.g. 198.18.0.0/15
+	Gateway   string   "json:\"gateway,omitempty\"" // e.g. 198.18.0.1
+	Subnet    string   "json:\"subnet,omitempty\""  // e.g. 198.18.0.0/15
 	MTU       int      "json:\"mtu,omitempty\""
-	DoH       []string "json:\"doh,omitempty\""       // DoH endpoints for fake-DNS
+	DoH       []string "json:\"doh,omitempty\""        // DoH endpoints for fake-DNS
 	ExcludeIP []string "json:\"exclude_ip,omitempty\"" // server IPs via physical gateway
 }
 
@@ -54,8 +54,8 @@ type TUNConfig struct {
 type Store struct {
 	ActiveProfile string    "json:\"active_profile\""
 	Profiles      []Profile "json:\"profiles\""
-	CorePath      string    "json:\"core_path,omitempty\""       // naive.exe location
-	InternalSocks string    "json:\"internal_socks,omitempty\""  // core's local socks entry
+	CorePath      string    "json:\"core_path,omitempty\""      // naive.exe location
+	InternalSocks string    "json:\"internal_socks,omitempty\"" // core's local socks entry
 	LogLevel      string    "json:\"log_level,omitempty\""
 }
 
@@ -158,7 +158,7 @@ func (s *Store) Save() error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(s, "", "  ")
@@ -166,7 +166,7 @@ func (s *Store) Save() error {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)

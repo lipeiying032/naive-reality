@@ -13,13 +13,14 @@
 #    naivereal-frontend (本仓库 frontend/ 交叉编译产物)
 # 2. 生成 REALITY 密钥对(本地或服务器均可)
 ./naivereal-frontend genkey
-# 3. 编辑 /etc/naivereal/frontend.toml(见 frontend/frontend.toml.example)
+# 3. 编辑 /etc/naivereal/frontend.toml 和 /etc/naivereal/naive.json
+#    必须替换 private_key、short_ids、目标站和代理用户名/密码
 # 4. 安装并启动
 sudo ./deploy/install.sh ./你的二进制目录
 sudo systemctl enable --now naivereal naivereal-frontend
 ```
 
-Docker: `docker build -t naivereal . && docker run -d --network host -v $PWD/frontend.toml:/etc/naivereal/frontend.toml naivereal`
+Docker: `docker build -f deploy/Dockerfile -t naivereal . && docker run -d --network host -v $PWD/frontend.toml:/etc/naivereal/frontend.toml:ro -v $PWD/naive.json:/etc/naivereal/naive.json:ro naivereal`
 
 ## 目标站选择标准(REALITY 中继目标)
 
@@ -45,7 +46,7 @@ Docker: `docker build -t naivereal . && docker run -d --network host -v $PWD/fro
 
 ## 运维
 
-- 状态: `curl "http://127.0.0.1:9090/stats?token=..."`(若配置了 status 端点)
+- 状态: `curl -H "Authorization: Bearer <token>" http://127.0.0.1:9090/stats`(若配置了 status 端点；不要把令牌放在 URL 中)
 - 重启: systemctl restart naivereal naivereal-frontend
 - 密钥轮换: 重新 genkey -> 更新 frontend.toml 与所有客户端 public_key -> 重启
 - 证书: REALITY 模式无证书管理; 若用 tls 模式(兼容官方 naive 客户端), 证书用你的真实域名证书

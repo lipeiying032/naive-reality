@@ -27,5 +27,5 @@ handshake_timeout = "10s"
 idle_timeout = "300s"
 
 [status]
-http = "127.0.0.1:9090"                # optional; GET /stats?token=...
-token = "changeme"
+http = ""                              # optional, e.g. "127.0.0.1:9090"
+token = ""                             # required when http is enabled; send as Authorization: Bearer TOKEN

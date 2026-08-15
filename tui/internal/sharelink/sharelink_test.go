@@ -1,6 +1,7 @@
 package sharelink
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -20,6 +21,37 @@ func TestParseNaiveLink(t *testing.T) {
 	}
 	if p.Reality != nil {
 		t.Errorf("unexpected reality block: %+v", p.Reality)
+	}
+}
+
+func TestIPv6AndEscapedCredentialsRoundtrip(t *testing.T) {
+	link := "naivereal://user%40example.com:p%3Aa%25ss@[2001:db8::1]:8443?server_name=example.com&public_key=" + testPub + "&short_id=abcd#IPv6%20node"
+	p, err := Parse(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Server != "2001:db8::1" || p.Port != 8443 {
+		t.Fatalf("server = %q:%d", p.Server, p.Port)
+	}
+	if p.Username != "user@example.com" || p.Password != "p:a%ss" {
+		t.Fatalf("credentials = %q:%q", p.Username, p.Password)
+	}
+	built, err := Build(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(built)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Hostname() != p.Server || u.Port() != "8443" {
+		t.Fatalf("roundtrip host = %q", u.Host)
+	}
+}
+
+func TestRejectsInvalidPort(t *testing.T) {
+	if _, err := Parse("naive+https://example.com:70000"); err == nil {
+		t.Fatal("out-of-range port should fail")
 	}
 }
 

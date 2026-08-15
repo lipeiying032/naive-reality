@@ -33,21 +33,26 @@ type dnsHeader struct {
 
 // parseQuery extracts the first question from a DNS query packet.
 func parseQuery(pkt []byte) (h dnsHeader, name string, qtype uint16, err error) {
+	h, name, qtype, _, err = parseQueryWithEnd(pkt)
+	return
+}
+
+func parseQueryWithEnd(pkt []byte) (h dnsHeader, name string, qtype uint16, questionEnd int, err error) {
 	if len(pkt) < 12 {
-		return h, "", 0, fmt.Errorf("dns packet too short")
+		return h, "", 0, 0, fmt.Errorf("dns packet too short")
 	}
 	h.ID = binary.BigEndian.Uint16(pkt[0:])
 	h.Flags = binary.BigEndian.Uint16(pkt[2:])
 	h.QDCount = binary.BigEndian.Uint16(pkt[4:])
 	h.ANCount = binary.BigEndian.Uint16(pkt[6:])
-	if h.QDCount == 0 {
-		return h, "", 0, fmt.Errorf("dns query without question")
+	if h.QDCount != 1 {
+		return h, "", 0, 0, fmt.Errorf("dns query must contain exactly one question")
 	}
 	off := 12
 	var labels []string
 	for {
 		if off >= len(pkt) {
-			return h, "", 0, fmt.Errorf("dns name overruns packet")
+			return h, "", 0, 0, fmt.Errorf("dns name overruns packet")
 		}
 		l := int(pkt[off])
 		off++
@@ -55,37 +60,47 @@ func parseQuery(pkt []byte) (h dnsHeader, name string, qtype uint16, err error) 
 			break
 		}
 		if l&0xC0 == 0xC0 {
-			return h, "", 0, fmt.Errorf("compressed qname unsupported")
+			return h, "", 0, 0, fmt.Errorf("compressed qname unsupported")
 		}
 		if off+l > len(pkt) {
-			return h, "", 0, fmt.Errorf("dns label overruns packet")
+			return h, "", 0, 0, fmt.Errorf("dns label overruns packet")
 		}
 		labels = append(labels, string(pkt[off:off+l]))
 		off += l
 	}
 	if off+4 > len(pkt) {
-		return h, "", 0, fmt.Errorf("dns question overruns packet")
+		return h, "", 0, 0, fmt.Errorf("dns question overruns packet")
 	}
 	qtype = binary.BigEndian.Uint16(pkt[off:])
 	name = strings.Join(labels, ".")
-	return h, name, qtype, nil
+	return h, name, qtype, off + 4, nil
 }
 
 // buildResponse renders a DNS answer carrying the given A/AAAA records.
 func buildResponse(query []byte, ips []net.IP, ttl uint32) ([]byte, error) {
-	h, _, _, err := parseQuery(query)
+	h, _, qtype, questionEnd, err := parseQueryWithEnd(query)
 	if err != nil {
 		return nil, err
 	}
+	filtered := make([]net.IP, 0, len(ips))
+	for _, ip := range ips {
+		if (qtype == qtypeA && ip.To4() != nil) || (qtype == qtypeAAAA && ip.To4() == nil && ip.To16() != nil) {
+			filtered = append(filtered, ip)
+		}
+	}
+	ips = filtered
 	resp := make([]byte, 0, 512)
 	resp = append(resp, query[:12]...)
-	flags := h.Flags | flagQR | flagRA
+	flags := flagQR | flagRA | (h.Flags & flagRD) | (h.Flags & 0x7800)
 	if len(ips) == 0 {
 		flags |= 3 // NXDOMAIN
 	}
 	binary.BigEndian.PutUint16(resp[2:], flags)
-	// question section: echo the original question verbatim
-	resp = append(resp, query[12:]...)
+	// Echo only the question. Additional records such as EDNS OPT must follow
+	// the answer section, so they cannot be copied ahead of generated answers.
+	resp = append(resp, query[12:questionEnd]...)
+	binary.BigEndian.PutUint16(resp[8:], 0)
+	binary.BigEndian.PutUint16(resp[10:], 0)
 	if len(ips) == 0 {
 		binary.BigEndian.PutUint16(resp[6:], 0)
 		return resp, nil

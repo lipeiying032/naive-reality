@@ -11,6 +11,11 @@ func TestEnableDisableRestoreRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Skipf("registry unavailable: %v", err)
 	}
+	t.Cleanup(func() {
+		if err := Restore(prev); err != nil {
+			t.Errorf("restore system proxy during cleanup: %v", err)
+		}
+	})
 	if _, err := Enable("127.0.0.1:1080", "localhost;127.*"); err != nil {
 		t.Skipf("registry write unavailable: %v", err)
 	}

@@ -173,7 +173,7 @@ index b3d4cb9..9b3b6ac 100644
  
    // OpenSSL decoded the certificate, but the X509Certificate implementation
    // could not. This is treated as a fatal SSL-level protocol error rather than
-@@ -1104,6 +1127,23 @@ ssl_verify_result_t SSLClientSocketImpl::VerifyCert() {
+@@ -1104,6 +1127,24 @@ ssl_verify_result_t SSLClientSocketImpl::VerifyCert() {
      return ssl_verify_invalid;
    }
  
@@ -190,6 +190,7 @@ index b3d4cb9..9b3b6ac 100644
 +      server_cert_verify_result_.Reset();
 +      server_cert_verify_result_.verified_cert = server_cert_;
 +      cert_verification_result_ = OK;
++      reality_cert_verified_ = true;
 +      return HandleVerifyResult();
 +    }
 +  }
@@ -197,11 +198,11 @@ index b3d4cb9..9b3b6ac 100644
    net_log_.AddEvent(NetLogEventType::SSL_CERTIFICATES_RECEIVED, [&] {
      return base::DictValue().Set("certificates",
                                   NetLogX509CertificateList(server_cert_.get()));
-@@ -1264,6 +1304,13 @@ ssl_verify_result_t SSLClientSocketImpl::HandleVerifyResult() {
+@@ -1264,6 +1305,13 @@ ssl_verify_result_t SSLClientSocketImpl::HandleVerifyResult() {
    }
  
    if (result == OK) {
-+    if (reality_configured_) {
++    if (reality_configured_ && !reality_cert_verified_) {
 +      // The certificate verifies for the SNI but is not the REALITY server:
 +      // the connection was intercepted/redirected to the real target site.
 +      // This distinctive error is the spider-mode trigger.
@@ -215,12 +216,14 @@ diff --git a/net/socket/ssl_client_socket_impl.h b/net/socket/ssl_client_socket_
 index ef87745..757dde9 100644
 --- a/net/socket/ssl_client_socket_impl.h
 +++ b/net/socket/ssl_client_socket_impl.h
-@@ -289,6 +289,9 @@ class NET_EXPORT_PRIVATE SSLClientSocketImpl
+@@ -289,6 +289,11 @@ class NET_EXPORT_PRIVATE SSLClientSocketImpl
    // True if certificate verification used an ECH name override.
    bool used_ech_name_override_ = false;
  
 +  // True if REALITY mode was applied to this connection's handshake.
 +  bool reality_configured_ = false;
++  // True if the REALITY HMAC certificate check succeeded.
++  bool reality_cert_verified_ = false;
 +
    NextProto negotiated_protocol_ = NextProto::kProtoUnknown;
  

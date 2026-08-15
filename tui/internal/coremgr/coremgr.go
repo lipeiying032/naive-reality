@@ -5,9 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -30,13 +33,16 @@ func BuildCoreConfig(p *config.Profile, internalSocks string) coreConfig {
 	if p.TLS != nil && !*p.TLS {
 		scheme = "http"
 	}
-	proxy := fmt.Sprintf("%s://%s:%d", scheme, p.Server, p.Port)
+	proxyURL := &url.URL{
+		Scheme: scheme,
+		Host:   net.JoinHostPort(p.Server, strconv.Itoa(p.Port)),
+	}
 	if p.Username != "" || p.Password != "" {
-		proxy = fmt.Sprintf("%s://%s:%s@%s:%d", scheme, p.Username, p.Password, p.Server, p.Port)
+		proxyURL.User = url.UserPassword(p.Username, p.Password)
 	}
 	cc := coreConfig{
 		Listen:              "socks://" + internalSocks,
-		Proxy:               proxy,
+		Proxy:               proxyURL.String(),
 		InsecureConcurrency: p.InsecureConcurrency,
 	}
 	if p.Reality != nil {
@@ -47,12 +53,12 @@ func BuildCoreConfig(p *config.Profile, internalSocks string) coreConfig {
 
 // Manager runs the core process and restarts it on unexpected exits.
 type Manager struct {
-	mu       sync.Mutex
-	cmd      *exec.Cmd
-	running  bool
-	stopping bool
+	mu         sync.Mutex
+	cmd        *exec.Cmd
+	running    bool
+	generation uint64
 
-	Logs chan string // ring of recent core output lines (non-blocking)
+	Logs  chan string // ring of recent core output lines (non-blocking)
 	Exits chan string // unexpected exit reason (buffered, non-blocking send)
 }
 
@@ -76,8 +82,6 @@ func (m *Manager) Start(ctx context.Context, store *config.Store, p *config.Prof
 		m.mu.Unlock()
 		return fmt.Errorf("core already running")
 	}
-	m.running = true
-	m.stopping = false
 	m.mu.Unlock()
 
 	dir, err := config.Dir()
@@ -90,18 +94,42 @@ func (m *Manager) Start(ctx context.Context, store *config.Store, p *config.Prof
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	if err := os.WriteFile(cfgPath, data, 0o644); err != nil {
+	tmpPath := cfgPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, cfgPath); err != nil {
+		_ = os.Remove(tmpPath)
 		return err
 	}
 
+	m.mu.Lock()
+	if m.running {
+		m.mu.Unlock()
+		return fmt.Errorf("core already running")
+	}
+	m.generation++
+	generation := m.generation
+	m.running = true
+	m.mu.Unlock()
+
 	go func() {
+		defer func() {
+			m.mu.Lock()
+			if m.generation == generation {
+				m.running = false
+				m.cmd = nil
+			}
+			m.mu.Unlock()
+		}()
 		backoff := time.Second
 		for {
 			m.mu.Lock()
-			if m.stopping {
+			if !m.running || m.generation != generation {
 				m.mu.Unlock()
 				return
 			}
@@ -116,8 +144,10 @@ func (m *Manager) Start(ctx context.Context, store *config.Store, p *config.Prof
 			m.emit(fmt.Sprintf("core: starting %s %s", store.CorePath, cfgPath))
 			err := cmd.Run()
 			m.mu.Lock()
-			m.cmd = nil
-			stopping := m.stopping
+			if m.generation == generation {
+				m.cmd = nil
+			}
+			stopping := !m.running || m.generation != generation
 			m.mu.Unlock()
 			if stopping || ctx.Err() != nil {
 				return
@@ -144,15 +174,13 @@ func (m *Manager) Start(ctx context.Context, store *config.Store, p *config.Prof
 // Stop terminates the core process.
 func (m *Manager) Stop() {
 	m.mu.Lock()
-	m.stopping = true
+	m.generation++
+	m.running = false
 	cmd := m.cmd
 	m.mu.Unlock()
 	if cmd != nil && cmd.Process != nil {
-		cmd.Process.Kill()
+		_ = cmd.Process.Kill()
 	}
-	m.mu.Lock()
-	m.running = false
-	m.mu.Unlock()
 }
 
 // lineWriter feeds process output into the log ring line by line.

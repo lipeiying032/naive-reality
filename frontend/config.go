@@ -87,6 +87,14 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 func (c *Config) applyDefaultsAndValidate() error {
+	if c.LogLevel == "" {
+		c.LogLevel = "info"
+	}
+	switch c.LogLevel {
+	case "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("log_level %q: must be debug, info, warn, or error", c.LogLevel)
+	}
 	if c.Inbound.Listen == "" {
 		c.Inbound.Listen = "0.0.0.0:443"
 	}
@@ -114,14 +122,30 @@ func (c *Config) applyDefaultsAndValidate() error {
 		if len(c.Inbound.Reality.ServerNames) == 0 {
 			return fmt.Errorf("inbound.reality.server_names must contain at least one SNI")
 		}
+		for i, name := range c.Inbound.Reality.ServerNames {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				return fmt.Errorf("inbound.reality.server_names[%d] must not be empty", i)
+			}
+			c.Inbound.Reality.ServerNames[i] = name
+		}
 		if _, err := parseRealityPrivateKey(c.Inbound.Reality.PrivateKey); err != nil {
 			return err
+		}
+		if len(c.Inbound.Reality.ShortIDs) == 0 {
+			return fmt.Errorf("inbound.reality.short_ids must contain at least one ID")
 		}
 		if _, err := parseShortIDs(c.Inbound.Reality.ShortIDs); err != nil {
 			return err
 		}
+		if c.Inbound.Reality.MaxTimeDiff < 0 {
+			return fmt.Errorf("inbound.reality.max_time_diff must not be negative")
+		}
 		if c.Inbound.Reality.Target == "" {
 			c.Inbound.Reality.Target = c.Inbound.Reality.ServerNames[0] + ":443"
+		}
+		if _, _, err := net.SplitHostPort(c.Inbound.Reality.Target); err != nil {
+			return fmt.Errorf("inbound.reality.target %q: %w", c.Inbound.Reality.Target, err)
 		}
 	case "tls":
 		if c.Inbound.TLS.Cert == "" || c.Inbound.TLS.Key == "" {
@@ -134,17 +158,37 @@ func (c *Config) applyDefaultsAndValidate() error {
 			return fmt.Errorf("inbound.tls.key: %w", err)
 		}
 	}
-	if c.Limits.MaxConnections <= 0 {
+	if c.Limits.MaxConnections < 0 {
+		return fmt.Errorf("limits.max_connections must not be negative")
+	}
+	if c.Limits.MaxConnections == 0 {
 		c.Limits.MaxConnections = 1024
 	}
-	if c.Limits.MaxRelays <= 0 {
+	if c.Limits.MaxRelays < 0 {
+		return fmt.Errorf("limits.max_relays must not be negative")
+	}
+	if c.Limits.MaxRelays == 0 {
 		c.Limits.MaxRelays = 64
 	}
-	if c.Limits.HandshakeTimeout.Duration <= 0 {
+	if c.Limits.HandshakeTimeout.Duration < 0 {
+		return fmt.Errorf("limits.handshake_timeout must not be negative")
+	}
+	if c.Limits.HandshakeTimeout.Duration == 0 {
 		c.Limits.HandshakeTimeout.Duration = 10 * time.Second
 	}
-	if c.Limits.IdleTimeout.Duration <= 0 {
+	if c.Limits.IdleTimeout.Duration < 0 {
+		return fmt.Errorf("limits.idle_timeout must not be negative")
+	}
+	if c.Limits.IdleTimeout.Duration == 0 {
 		c.Limits.IdleTimeout.Duration = 300 * time.Second
+	}
+	if c.Status.HTTP != "" {
+		if _, _, err := net.SplitHostPort(c.Status.HTTP); err != nil {
+			return fmt.Errorf("status.http %q: %w", c.Status.HTTP, err)
+		}
+		if strings.TrimSpace(c.Status.Token) == "" {
+			return fmt.Errorf("status.token is required when status.http is enabled")
+		}
 	}
 	return nil
 }

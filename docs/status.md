@@ -1,6 +1,6 @@
 # 项目状态
 
-更新时间: 本会话最后一次自动续跑.
+更新时间: 2026-08-15.
 
 ## 已完成
 
@@ -13,10 +13,10 @@
 - M3 Windows TUI 客户端(tui/): 档案管理/分享链接(naive+https 与 naivereal)/核心监管/入口(SOCKS5+HTTP)/统计/系统代理/日志;
   - 数据链路 e2e: TUI 入口 -> 官方内核 -> 官方服务端 -> 外网 通过.
 - REALITY 生态互操作: realitytest 客户端与真实 Xray-core v26.3.27 VLESS+Reality 入站握手成功, 临时证书 HMAC 校验通过(线格式与参考生态完全兼容).
-- M4 TUN(tui/internal/tun/): wintun+gVisor 完整实现编译通过并接入 TUI(gvisor 钉 2026-01 伪版本, 最新伪版本的代理 zip 损坏已规避); DNS 编解码+DoH 测试通过; 运行时验收需管理员环境.
+- M4 TUN(tui/internal/tun/): wintun+gVisor 已接入 TUI；数据包长度、TCP 生命周期、DNS/EDNS 和服务器排除路由已有回归测试；建卡与系统路由仍需在 Windows 管理员环境手工验收.
 - M4 v2rayN: 实测 7.24.4 发行包与 core-bin 仓库, 内核路径确认 bin\naiveproxy\naive.exe, 替换指南定稿.
 - M5 发布: 前端 Linux/Win 二进制 + TUI Win 二进制已产出并冒烟通过; 部署/构建/Windows/TUN 文档成稿;
-  - CI: .github/workflows/go.yml(Go 测试) + build-kernel.yml(内核 Linux x64/arm64 + Windows x64, 复刻官方流水线).
+  - CI: .github/workflows/go.yml(Go 测试、vet、Windows 官方内核入口 e2e) + build-kernel.yml(内核 Linux x64/arm64 + Windows x64, 复刻官方流水线).
 
 ## 已推送 GitHub(PR #1)
 
@@ -31,13 +31,12 @@
 - 修复(PR #3): 仓库根新增 config.json(含 reality 块样例)与 USAGE.txt; 打包步骤改从 $GITHUB_WORKSPACE 拷贝; windows 打包改用 naive.exe; 全部 7 个 actions/cache 步骤加 save-always(失败也保存 ccache/工具链, 重跑复用增量编译, 不再冷构建).
 - ccache/sccache 上限 200M -> 1G.
 
-## 待办
+## 当前验证重点
 
-1. 等待 Build Kernel 重跑(PR #3): 成功后 reality-e2e 自动执行 REALITY 全链路验证.
-2. TUN 管理员环境手工验收(建卡/路由/DNS).
-3. 压测/脱敏审计后正式发布.
+1. 本次修复 PR 的 Build Kernel 成功后，`reality-e2e` 会自动执行 REALITY 全链路验证；Linux arm64 构建已显式安装 qemu-user 来运行目标架构产物.
+2. TUN 仍需 Windows 管理员环境手工验收(建卡、物理网关排除路由、DNS 和断开恢复).
+3. 正式发布前继续进行长连接压测与运行日志脱敏审计.
 
-## 需要用户提供
+## 部署前需要提供
 
-- GitHub 仓库地址(用于 CI; 本仓库为 naiveproxy fork + Go 子模块 + patches/).
 - 服务器部署信息(目标站/SNI/shortId 策略)以便给出上线配置样例.

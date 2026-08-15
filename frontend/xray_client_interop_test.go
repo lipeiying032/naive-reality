@@ -160,7 +160,9 @@ func TestXrayClientToOurFrontend(t *testing.T) {
 	// poll the frontend stats until the connection was authenticated
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/stats?token=test", statusPort))
+		req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/stats", statusPort), nil)
+		req.Header.Set("Authorization", "Bearer test")
+		resp, err := http.DefaultClient.Do(req)
 		if err == nil {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()

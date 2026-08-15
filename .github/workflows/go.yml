@@ -20,12 +20,40 @@ jobs:
       - name: Test frontend
         working-directory: frontend
         run: go test -race ./...
+      - name: Vet frontend
+        working-directory: frontend
+        run: go vet ./...
       - name: Build frontend
         working-directory: frontend
         run: go build ./...
+      - name: Download official naive core for Windows e2e
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Get-Content CHROMIUM_VERSION -Raw).Trim()
+          $headers = @{ Authorization = "Bearer $env:GITHUB_TOKEN"; "X-GitHub-Api-Version" = "2022-11-28" }
+          $release = Invoke-RestMethod -Headers $headers https://api.github.com/repos/klzgrad/naiveproxy/releases/latest
+          if ($release.tag_name -notlike "v$version-*") {
+            throw "latest official release $($release.tag_name) does not match pinned Chromium $version"
+          }
+          $archive = "naiveproxy-$($release.tag_name)-win-x64.zip"
+          $asset = $release.assets | Where-Object name -EQ $archive | Select-Object -First 1
+          if (-not $asset) { throw "$archive missing from official release" }
+          New-Item -ItemType Directory -Force tools/naive-win | Out-Null
+          Invoke-WebRequest $asset.browser_download_url -OutFile "tools/naive-win/$archive"
+          Expand-Archive "tools/naive-win/$archive" -DestinationPath tools/naive-win/core
+          $exe = Get-ChildItem tools/naive-win/core -Recurse -Filter naive.exe | Select-Object -First 1
+          if (-not $exe) { throw "naive.exe missing from $archive" }
+          "NAIVE_TEST_EXE=$($exe.FullName)" >> $env:GITHUB_ENV
+          "NAIVEREAL_REQUIRE_CORE_E2E=1" >> $env:GITHUB_ENV
       - name: Test tui
         working-directory: tui
         run: go test ./...
+      - name: Vet tui
+        working-directory: tui
+        run: go vet ./...
       - name: Build tui
         working-directory: tui
         run: go build ./...

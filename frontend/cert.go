@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,9 +25,15 @@ func runGencert(args []string) {
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "-hosts":
+			if i+1 >= len(args) {
+				fatal("gencert", fmt.Errorf("-hosts requires a value"))
+			}
 			i++
 			hosts = strings.Split(args[i], ",")
 		case "-out":
+			if i+1 >= len(args) {
+				fatal("gencert", fmt.Errorf("-out requires a value"))
+			}
 			i++
 			out = args[i]
 		default:
@@ -34,7 +41,26 @@ func runGencert(args []string) {
 			os.Exit(1)
 		}
 	}
-	if err := os.MkdirAll(out, 0o755); err != nil {
+	var dnsNames []string
+	var ipAddresses []net.IP
+	for _, host := range hosts {
+		host = strings.TrimSpace(host)
+		if host == "" {
+			fatal("gencert", fmt.Errorf("hosts must not be empty"))
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			ipAddresses = append(ipAddresses, ip)
+		} else {
+			dnsNames = append(dnsNames, host)
+		}
+	}
+	commonName := "naive.test"
+	if len(dnsNames) > 0 {
+		commonName = dnsNames[0]
+	} else if len(ipAddresses) > 0 {
+		commonName = ipAddresses[0].String()
+	}
+	if err := os.MkdirAll(out, 0o700); err != nil {
 		fmt.Fprintln(os.Stderr, "mkdir:", err)
 		os.Exit(1)
 	}
@@ -63,29 +89,40 @@ func runGencert(args []string) {
 	}
 	leafTmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(2),
-		Subject:      pkix.Name{CommonName: hosts[0]},
+		Subject:      pkix.Name{CommonName: commonName},
 		NotBefore:    now.Add(-time.Hour),
 		NotAfter:     now.AddDate(1, 0, 0),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		DNSNames:     hosts,
+		DNSNames:     dnsNames,
+		IPAddresses:  ipAddresses,
 	}
 	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, caTmpl, &leafKey.PublicKey, caKey)
 	if err != nil {
 		fatal("leaf cert", err)
 	}
 
-	writePEM := func(name, typ string, der []byte) {
-		if err := os.WriteFile(filepath.Join(out, name), pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der}), 0o644); err != nil {
+	writePEM := func(name, typ string, der []byte, mode os.FileMode) {
+		path := filepath.Join(out, name)
+		if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der}), mode); err != nil {
 			fatal("write "+name, err)
 		}
+		if err := os.Chmod(path, mode); err != nil {
+			fatal("chmod "+name, err)
+		}
 	}
-	caKeyDER, _ := x509.MarshalECPrivateKey(caKey)
-	leafKeyDER, _ := x509.MarshalECPrivateKey(leafKey)
-	writePEM("ca.pem", "CERTIFICATE", caDER)
-	writePEM("ca-key.pem", "EC PRIVATE KEY", caKeyDER)
-	writePEM("server.pem", "CERTIFICATE", leafDER)
-	writePEM("server-key.pem", "EC PRIVATE KEY", leafKeyDER)
+	caKeyDER, err := x509.MarshalECPrivateKey(caKey)
+	if err != nil {
+		fatal("marshal ca key", err)
+	}
+	leafKeyDER, err := x509.MarshalECPrivateKey(leafKey)
+	if err != nil {
+		fatal("marshal server key", err)
+	}
+	writePEM("ca.pem", "CERTIFICATE", caDER, 0o644)
+	writePEM("ca-key.pem", "EC PRIVATE KEY", caKeyDER, 0o600)
+	writePEM("server.pem", "CERTIFICATE", leafDER, 0o644)
+	writePEM("server-key.pem", "EC PRIVATE KEY", leafKeyDER, 0o600)
 	fmt.Println("written ca.pem ca-key.pem server.pem server-key.pem to", out)
 	fmt.Println("import ca.pem into the client trust store, then use server.pem/server-key.pem in frontend.toml [inbound.tls]")
 }

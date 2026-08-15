@@ -22,7 +22,7 @@ fi
 cp "$ROOT/frontend/frontend.toml.example" "$OUT/"
 cp "$ROOT/LICENSE-Go" "$ROOT/NOTICE.md" "$ROOT/README.md" "$OUT/"
 mkdir -p "$OUT/deploy"
-cp "$ROOT/deploy/naivereal.service" "$ROOT/deploy/naivereal-frontend.service" "$ROOT/deploy/install.sh" "$OUT/deploy/"
+cp "$ROOT/deploy/naivereal.service" "$ROOT/deploy/naivereal-frontend.service" "$ROOT/deploy/naive.json.example" "$ROOT/deploy/install.sh" "$OUT/deploy/"
 mkdir -p "$OUT/docs"
 cp "$ROOT/docs/deploy.md" "$ROOT/docs/protocol.md" "$OUT/docs/"
 

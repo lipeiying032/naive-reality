@@ -17,12 +17,21 @@ func runTLSServe(args []string) {
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "-cert":
+			if i+1 >= len(args) {
+				fatal("tlsserve", fmt.Errorf("-cert requires a value"))
+			}
 			i++
 			certPath = args[i]
 		case "-key":
+			if i+1 >= len(args) {
+				fatal("tlsserve", fmt.Errorf("-key requires a value"))
+			}
 			i++
 			keyPath = args[i]
 		case "-listen":
+			if i+1 >= len(args) {
+				fatal("tlsserve", fmt.Errorf("-listen requires a value"))
+			}
 			i++
 			listen = args[i]
 		default:

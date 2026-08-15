@@ -5,11 +5,16 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Official naive server on 127.0.0.1:8080. Set your own credentials!
-ExecStart=/usr/local/bin/naive --listen=http://user:pass@127.0.0.1:8080
+User=naivereal
+Group=naivereal
+ExecStart=/usr/local/bin/naive /etc/naivereal/naive.json
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
 
 [Install]
 WantedBy=multi-user.target

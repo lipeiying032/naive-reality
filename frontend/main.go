@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,10 +22,23 @@ var log = slog.New(slog.NewTextHandler(os.Stderr, nil))
 // tunnelServer terminates REALITY (or plain TLS) and relays CONNECT streams
 // to the official naive server over HTTP/1.1.
 type tunnelServer struct {
-	cfg    *Config
-	rCfg   *reality.Config
-	tlsCfg *tls.Config
-	stats  *Stats
+	cfg        *Config
+	rCfg       *reality.Config
+	tlsCfg     *tls.Config
+	stats      *Stats
+	relaySlots chan struct{}
+}
+
+type relayConn struct {
+	net.Conn
+	once    sync.Once
+	release func()
+}
+
+func (c *relayConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.release)
+	return err
 }
 
 // NewTunnelServer builds the server from a validated configuration.
@@ -34,15 +48,29 @@ func NewTunnelServer(cfg *Config) (*tunnelServer, error) {
 	switch cfg.Inbound.Mode {
 	case "reality":
 		relay := cfg.Inbound.Reality.RelayEnabled == nil || *cfg.Inbound.Reality.RelayEnabled
+		s.relaySlots = make(chan struct{}, cfg.Limits.MaxRelays)
 		dialer := &net.Dialer{Timeout: 10 * time.Second}
 		dialContext := func(ctx context.Context, network, address string) (net.Conn, error) {
 			if !relay {
 				return nil, fmt.Errorf("relay disabled")
 			}
+			select {
+			case s.relaySlots <- struct{}{}:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			default:
+				return nil, fmt.Errorf("relay limit reached")
+			}
+			release := func() { <-s.relaySlots }
 			if address == "" {
 				address = cfg.Inbound.Reality.Target
 			}
-			return dialer.DialContext(ctx, network, address)
+			conn, err := dialer.DialContext(ctx, network, address)
+			if err != nil {
+				release()
+				return nil, err
+			}
+			return &relayConn{Conn: conn, release: release}, nil
 		}
 		rc, err := buildRealityConfig(cfg, dialContext)
 		if err != nil {
@@ -155,6 +183,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "config:", err)
 		os.Exit(1)
 	}
+	configureLogging(cfg.LogLevel)
 	srv, err := NewTunnelServer(cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "setup:", err)
@@ -172,4 +201,19 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("shutdown complete")
+}
+
+func configureLogging(level string) {
+	var slogLevel slog.Level
+	switch level {
+	case "debug":
+		slogLevel = slog.LevelDebug
+	case "warn":
+		slogLevel = slog.LevelWarn
+	case "error":
+		slogLevel = slog.LevelError
+	default:
+		slogLevel = slog.LevelInfo
+	}
+	log = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slogLevel}))
 }

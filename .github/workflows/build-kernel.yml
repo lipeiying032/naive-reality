@@ -92,7 +92,7 @@ jobs:
       - name: Install APT packages
         run: |
           sudo apt update
-          sudo apt install ninja-build pkg-config ccache bubblewrap
+          sudo apt install ninja-build pkg-config ccache bubblewrap qemu-user
       - name: Build
         working-directory: upstream/src
         run: |
