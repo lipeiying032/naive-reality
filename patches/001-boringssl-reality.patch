@@ -472,3 +472,24 @@ index 0000000..f7794a5
 +}  // namespace bssl
 +
 +#endif  // OPENSSL_HEADER_SSL_REALITY_H
+diff --git a/ssl/extensions.cc b/ssl/extensions.cc
+index 3697e7abd..d45ca284f 100644
+--- a/ssl/extensions.cc
++++ b/ssl/extensions.cc
+@@ -357,7 +357,15 @@ bool tls12_check_peer_sigalg(const SSL_HANDSHAKE *hs, uint8_t *out_alert,
+   // The peer must have selected an algorithm that is consistent with its public
+   // key, the TLS version, and what we advertised.
+   Span<const uint16_t> sigalgs = tls12_get_verify_sigalgs(hs);
+-  if (std::find(sigalgs.begin(), sigalgs.end(), sigalg) == sigalgs.end() ||
++  // REALITY replaces the target certificate with an authenticated temporary
++  // Ed25519 certificate. Chromium does not normally advertise Ed25519 for
++  // certificate verification, so allow this one signature scheme only for a
++  // configured REALITY handshake. Keep the advertised list unchanged so the
++  // mirrored ClientHello remains compatible with the real target.
++  const bool is_reality_ed25519 =
++      hs->ssl->reality_configured && sigalg == SSL_SIGN_ED25519;
++  if ((std::find(sigalgs.begin(), sigalgs.end(), sigalg) == sigalgs.end() &&
++       !is_reality_ed25519) ||
+       !ssl_pkey_supports_algorithm(hs->ssl, pkey, sigalg, /*is_verify=*/true)) {
+     OPENSSL_PUT_ERROR(SSL, SSL_R_WRONG_SIGNATURE_TYPE);
+     *out_alert = SSL_AD_ILLEGAL_PARAMETER;
