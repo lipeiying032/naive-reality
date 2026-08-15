@@ -1,0 +1,233 @@
+diff --git a/net/quic/quic_context.cc b/net/quic/quic_context.cc
+index 69f2699..482233a 100644
+--- a/net/quic/quic_context.cc
++++ b/net/quic/quic_context.cc
+@@ -18,8 +18,8 @@ namespace net {
+ namespace {
+ 
+ // The maximum receive window sizes for QUIC sessions and streams.
+-const int32_t kQuicSessionMaxRecvWindowSize = 15 * 1024 * 1024;  // 15 MB
+-const int32_t kQuicStreamMaxRecvWindowSize = 6 * 1024 * 1024;    // 6 MB
++const int32_t kQuicSessionMaxRecvWindowSize = 20 * 1024 * 1024;  // 20 MB
++const int32_t kQuicStreamMaxRecvWindowSize = 8 * 1024 * 1024;    // 8 MB
+ 
+ // Set the maximum number of undecryptable packets the connection will store.
+ const int32_t kMaxUndecryptablePackets = 100;
+diff --git a/net/quic/quic_context.h b/net/quic/quic_context.h
+index fb68e21..0c8c659 100644
+--- a/net/quic/quic_context.h
++++ b/net/quic/quic_context.h
+@@ -102,7 +102,7 @@ const int64_t kMaxMigrationsToNonDefaultNetworkOnPathDegrading = 5;
+ // We should adaptively set this buffer size, but for now, we'll use a size
+ // that seems large enough to receive data at line rate for most connections,
+ // and does not consume "too much" memory.
+-const int32_t kQuicSocketReceiveBufferSize = 1024 * 1024;  // 1MB
++const int32_t kQuicSocketReceiveBufferSize = 8 * 1024 * 1024;  // 8MB, aligned with Hysteria2 quic-go
+ 
+ // Structure containing simple configuration options and experiments for QUIC.
+ struct NET_EXPORT QuicParams {
+diff --git a/net/third_party/quiche/src/quiche/common/quiche_protocol_flags_list.h b/net/third_party/quiche/src/quiche/common/quiche_protocol_flags_list.h
+index 41438b7..07c9798 100644
+--- a/net/third_party/quiche/src/quiche/common/quiche_protocol_flags_list.h
++++ b/net/third_party/quiche/src/quiche/common/quiche_protocol_flags_list.h
+@@ -68,6 +68,11 @@ QUICHE_PROTOCOL_FLAG(
+     double, quic_bbr_cwnd_gain, 2.0f,
+     "Congestion window gain for QUIC BBR during PROBE_BW phase.")
+ 
++// QUIC BBR profile selector. 0: standard, 1: aggressive, 2: conservative.
++// The profiles mirror Hysteria2's BBR profiles.
++QUICHE_PROTOCOL_FLAG(int32_t, quic_bbr_profile, 0,
++                     "QUIC BBR profile: 0 standard, 1 aggressive, 2 conservative.")
++
+ QUICHE_PROTOCOL_FLAG(
+     int32_t, quic_buffered_data_threshold, 8 * 1024,
+     "If buffered data in QUIC stream is less than this "
+diff --git a/net/third_party/quiche/src/quiche/quic/core/congestion_control/bbr_sender.cc b/net/third_party/quiche/src/quiche/quic/core/congestion_control/bbr_sender.cc
+index 0178c5b..00f992c 100644
+--- a/net/third_party/quiche/src/quiche/quic/core/congestion_control/bbr_sender.cc
++++ b/net/third_party/quiche/src/quiche/quic/core/congestion_control/bbr_sender.cc
+@@ -146,12 +146,41 @@ BbrSender::BbrSender(QuicTime now, const RttStats* rtt_stats,
+     stats_->slowstart_count = 0;
+     stats_->slowstart_duration = QuicTimeAccumulator();
+   }
++  ApplyProfileFromFlags();
+   EnterStartupMode(now);
+-  set_high_cwnd_gain(kDerivedHighCWNDGain);
+ }
+ 
+ BbrSender::~BbrSender() {}
+ 
++void BbrSender::ApplyProfileFromFlags() {
++  const int32_t profile = GetQuicFlag(quic_bbr_profile);
++  congestion_window_gain_constant_ =
++      static_cast<float>(GetQuicFlag(quic_bbr_cwnd_gain));
++  switch (profile) {
++    case 1:  // Hysteria2 aggressive.
++      set_high_gain(3.0f);
++      set_high_cwnd_gain(2.25f);
++      congestion_window_gain_constant_ = 2.5f;
++      num_startup_rtts_ = 4;
++      enable_ack_aggregation_during_startup_ = true;
++      expire_ack_aggregation_in_startup_ = true;
++      bytes_lost_multiplier_while_detecting_overshooting_ = 2;
++      break;
++    case 2:  // Hysteria2 conservative.
++      set_high_gain(2.25f);
++      set_high_cwnd_gain(1.75f);
++      congestion_window_gain_constant_ = 1.75f;
++      num_startup_rtts_ = 2;
++      drain_to_target_ = true;
++      detect_overshooting_ = true;
++      bytes_lost_multiplier_while_detecting_overshooting_ = 1;
++      break;
++    default:  // standard: keep quiche defaults.
++      set_high_cwnd_gain(kDerivedHighCWNDGain);
++      break;
++  }
++}
++
+ void BbrSender::SetInitialCongestionWindowInPackets(
+     QuicPacketCount congestion_window) {
+   if (mode_ == STARTUP) {
+diff --git a/net/third_party/quiche/src/quiche/quic/core/congestion_control/bbr_sender.h b/net/third_party/quiche/src/quiche/quic/core/congestion_control/bbr_sender.h
+index eb887eb..7219f12 100644
+--- a/net/third_party/quiche/src/quiche/quic/core/congestion_control/bbr_sender.h
++++ b/net/third_party/quiche/src/quiche/quic/core/congestion_control/bbr_sender.h
+@@ -174,6 +174,10 @@ class QUICHE_EXPORT BbrSender : public SendAlgorithmInterface {
+     drain_gain_ = drain_gain;
+   }
+ 
++  // Applies the Hysteria2-aligned BBR profile selected by the
++  // quic_bbr_profile flag.
++  void ApplyProfileFromFlags();
++
+   // Returns the current estimate of the RTT of the connection.  Outside of the
+   // edge cases, this is minimum RTT.
+   QuicTime::Delta GetMinRtt() const;
+@@ -315,7 +319,7 @@ class QUICHE_EXPORT BbrSender : public SendAlgorithmInterface {
+ 
+   // The gain used for the congestion window during PROBE_BW.  Latched from
+   // quic_bbr_cwnd_gain flag.
+-  const float congestion_window_gain_constant_;
++  float congestion_window_gain_constant_;
+   // The number of RTTs to stay in STARTUP mode.  Defaults to 3.
+   QuicRoundTripCount num_startup_rtts_;
+ 
+diff --git a/net/tools/naive/naive_config.cc b/net/tools/naive/naive_config.cc
+index 7897ab4..43ab309 100644
+--- a/net/tools/naive/naive_config.cc
++++ b/net/tools/naive/naive_config.cc
+@@ -433,6 +433,43 @@ bool NaiveConfig::Parse(const base::DictValue& value) {
+     no_post_quantum = true;
+   }
+ 
++  // QUIC tuning for the Hysteria2-BBR alignment experiment. Supports both a
++  // nested "quic" object in config.json and flat --quic-* command-line flags.
++  if (const base::Value* v = value.Find("quic")) {
++    if (const base::DictValue* d = v->GetIfDict()) {
++      if (const std::string* str = d->FindString("bbr_profile")) {
++        quic.bbr_profile = *str;
++      }
++      if (const base::Value* b = d->Find("enable_socket_recv_optimization")) {
++        if (std::optional<bool> value = b->GetIfBool()) {
++          quic.enable_socket_recv_optimization = *value;
++        } else {
++          std::cerr << "Invalid quic.enable_socket_recv_optimization" << std::endl;
++          return false;
++        }
++      }
++    } else {
++      std::cerr << "Invalid quic" << std::endl;
++      return false;
++    }
++  }
++  if (const std::string* s = value.FindString("quic-bbr-profile")) {
++    quic.bbr_profile = *s;
++  }
++  if (const base::Value* v = value.Find("quic-disable-socket-recv-optimization")) {
++    if (std::optional<bool> b = v->GetIfBool()) {
++      quic.enable_socket_recv_optimization = !*b;
++    } else {
++      std::cerr << "Invalid quic-disable-socket-recv-optimization" << std::endl;
++      return false;
++    }
++  }
++  if (quic.bbr_profile != "standard" && quic.bbr_profile != "aggressive" &&
++      quic.bbr_profile != "conservative") {
++    std::cerr << "Invalid quic.bbr_profile: " << quic.bbr_profile << std::endl;
++    return false;
++  }
++
+   // REALITY client mode. Supports both a nested "reality" object in config.json
+   // and flat --reality-* command-line flags (surfaced as flat keys by
+   // GetSwitchesAsValue in naive_command_line.cc).
+diff --git a/net/tools/naive/naive_config.h b/net/tools/naive/naive_config.h
+index 7f7c025..07a6ad9 100644
+--- a/net/tools/naive/naive_config.h
++++ b/net/tools/naive/naive_config.h
+@@ -39,6 +39,11 @@ struct NaiveListenConfig {
+   bool Parse(const std::string& str);
+ };
+ 
++struct NaiveQuicConfig {
++  std::string bbr_profile = "standard";
++  bool enable_socket_recv_optimization = true;
++};
++
+ struct NaiveConfig {
+   std::vector<NaiveListenConfig> listen = {NaiveListenConfig()};
+ 
+@@ -75,6 +80,8 @@ struct NaiveConfig {
+ 
+   std::optional<RealityConfig> reality;
+ 
++  NaiveQuicConfig quic;
++
+   NaiveConfig();
+   NaiveConfig(const NaiveConfig&);
+   ~NaiveConfig();
+diff --git a/net/tools/naive/naive_proxy_bin.cc b/net/tools/naive/naive_proxy_bin.cc
+index 73c3799..317f84c 100644
+--- a/net/tools/naive/naive_proxy_bin.cc
++++ b/net/tools/naive/naive_proxy_bin.cc
+@@ -64,6 +64,7 @@
+ #include "net/ssl/ssl_config_service.h"
+ #include "net/ssl/ssl_key_logger_impl.h"
+ #include "net/third_party/quiche/src/quiche/quic/core/quic_versions.h"
++#include "net/third_party/quiche/src/quiche/quic/platform/api/quic_flags.h"
+ #include "net/tools/naive/naive_command_line.h"
+ #include "net/tools/naive/naive_config.h"
+ #include "net/tools/naive/naive_protocol.h"
+@@ -271,10 +272,20 @@ std::unique_ptr<URLRequestContext> BuildURLRequestContext(
+     builder.set_ssl_config_service(std::make_unique<NoPostQuantum>());
+   }
+ 
++  int32_t bbr_profile = 0;  // standard
++  if (config.quic.bbr_profile == "aggressive") {
++    bbr_profile = 1;
++  } else if (config.quic.bbr_profile == "conservative") {
++    bbr_profile = 2;
++  }
++  SetQuicFlag(quic_bbr_profile, bbr_profile);
++
+   auto context = builder.Build();
+ 
++  auto* quic = context->quic_context()->params();
++  quic->enable_socket_recv_optimization =
++      config.quic.enable_socket_recv_optimization;
+   if (!config.origins_to_force_quic_on.empty()) {
+-    auto* quic = context->quic_context()->params();
+     quic->supported_versions = {quic::ParsedQuicVersion::RFCv1()};
+     quic->origins_to_force_quic_on.insert(
+         config.origins_to_force_quic_on.begin(),
+@@ -428,6 +439,10 @@ int main(int argc, char* argv[]) {
+                  "--log-net-log=<path>       Save NetLog\n"
+                  "--ssl-key-log-file=<path>  Save SSL keys for Wireshark\n"
+                  "--no-post-quantum          No post-quantum key agreement\n"
++                 "--quic-bbr-profile=<P>     QUIC BBR profile:\n"
++                 "                           standard, aggressive, conservative\n"
++                 "--quic-disable-socket-recv-optimization\n"
++                 "                           Disable QUIC UDP recv optimization\n"
+                  "--reality-server-name=<host> REALITY SNI (target server)\n"
+                  "--reality-public-key=<b64url> REALITY server static public\n"
+                  "                           key (32 bytes, base64url)\n"
