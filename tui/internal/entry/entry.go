@@ -18,23 +18,32 @@ import (
 
 // Manager owns the user-facing listeners.
 type Manager struct {
-	mu       sync.Mutex
-	stats    *stats.Stats
+	mu        sync.Mutex
+	stats     *stats.Stats
 	listeners []net.Listener
-	closed   bool
+	conns     map[net.Conn]struct{}
+	closed    bool
 }
 
 // NewManager creates an entry manager.
-func NewManager(st *stats.Stats) *Manager { return &Manager{stats: st} }
+func NewManager(st *stats.Stats) *Manager {
+	return &Manager{stats: st, conns: make(map[net.Conn]struct{})}
+}
 
 // Dialer returns a dial function that routes TCP connections through the
 // core's internal SOCKS listener (used by the TUN data plane).
-func Dialer(coreSocks string) func(network, addr string) (net.Conn, error) {
+func Dialer(coreSocks string, st *stats.Stats) func(network, addr string) (net.Conn, error) {
 	return func(network, addr string) (net.Conn, error) {
 		if network != "tcp" {
 			return nil, fmt.Errorf("tun: unsupported network %q", network)
 		}
-		return socks5Dial(coreSocks, addr, &stats.Stats{})
+		conn, err := socks5Dial(coreSocks, addr)
+		if err != nil {
+			return nil, err
+		}
+		// This is the upstream side of the TUN splice: writes are uploads and
+		// reads are downloads.
+		return stats.NewCountingConn(conn, st, false), nil
 	}
 }
 
@@ -46,23 +55,41 @@ func (m *Manager) Start(socksAddr, httpAddr, coreSocks string) error {
 		return fmt.Errorf("entry manager closed")
 	}
 	dial := func(target string) (net.Conn, error) {
-		return socks5Dial(coreSocks, target, m.stats)
+		return socks5Dial(coreSocks, target)
+	}
+	var pending []struct {
+		ln     net.Listener
+		handle func(net.Conn)
+	}
+	closePending := func() {
+		for _, item := range pending {
+			_ = item.ln.Close()
+		}
 	}
 	if socksAddr != "" {
 		ln, err := net.Listen("tcp", socksAddr)
 		if err != nil {
 			return fmt.Errorf("socks listen: %w", err)
 		}
-		m.listeners = append(m.listeners, ln)
-		go m.acceptLoop(ln, func(c net.Conn) { serveSocks5(c, dial, m.stats) })
+		pending = append(pending, struct {
+			ln     net.Listener
+			handle func(net.Conn)
+		}{ln, func(c net.Conn) { serveSocks5(c, dial, m.stats) }})
 	}
 	if httpAddr != "" {
 		ln, err := net.Listen("tcp", httpAddr)
 		if err != nil {
+			closePending()
 			return fmt.Errorf("http listen: %w", err)
 		}
-		m.listeners = append(m.listeners, ln)
-		go m.acceptLoop(ln, func(c net.Conn) { serveHTTPConnect(c, dial, m.stats) })
+		pending = append(pending, struct {
+			ln     net.Listener
+			handle func(net.Conn)
+		}{ln, func(c net.Conn) { serveHTTPConnect(c, dial, m.stats) }})
+	}
+	for _, item := range pending {
+		m.listeners = append(m.listeners, item.ln)
+		go m.acceptLoop(item.ln, item.handle)
 	}
 	return nil
 }
@@ -73,7 +100,22 @@ func (m *Manager) acceptLoop(ln net.Listener, handle func(net.Conn)) {
 		if err != nil {
 			return
 		}
-		go handle(c)
+		m.mu.Lock()
+		if m.closed {
+			m.mu.Unlock()
+			_ = c.Close()
+			return
+		}
+		m.conns[c] = struct{}{}
+		m.mu.Unlock()
+		go func() {
+			defer func() {
+				m.mu.Lock()
+				delete(m.conns, c)
+				m.mu.Unlock()
+			}()
+			handle(c)
+		}()
 	}
 }
 
@@ -83,13 +125,17 @@ func (m *Manager) Stop() {
 	defer m.mu.Unlock()
 	m.closed = true
 	for _, ln := range m.listeners {
-		ln.Close()
+		_ = ln.Close()
 	}
 	m.listeners = nil
+	for c := range m.conns {
+		_ = c.Close()
+	}
+	m.conns = make(map[net.Conn]struct{})
 }
 
 // socks5Dial connects to target through the core's SOCKS5 listener.
-func socks5Dial(proxyAddr, target string, st *stats.Stats) (net.Conn, error) {
+func socks5Dial(proxyAddr, target string) (net.Conn, error) {
 	c, err := net.DialTimeout("tcp", proxyAddr, 10*time.Second)
 	if err != nil {
 		return nil, err
@@ -110,9 +156,9 @@ func socks5Dial(proxyAddr, target string, st *stats.Stats) (net.Conn, error) {
 		return nil, err
 	}
 	port, err := strconv.Atoi(portStr)
-	if err != nil {
+	if err != nil || port < 1 || port > 65535 {
 		c.Close()
-		return nil, err
+		return nil, fmt.Errorf("invalid target port %q", portStr)
 	}
 	req := []byte{5, 1, 0}
 	if ip := net.ParseIP(host); ip != nil {
@@ -136,13 +182,44 @@ func socks5Dial(proxyAddr, target string, st *stats.Stats) (net.Conn, error) {
 		c.Close()
 		return nil, err
 	}
-	resp := make([]byte, 10)
-	if _, err := io.ReadFull(c, resp); err != nil || resp[1] != 0 {
+	if err := readSocks5Reply(c); err != nil {
 		c.Close()
-		return nil, fmt.Errorf("core socks connect failed: rep=%v err=%v", resp[1], err)
+		return nil, err
 	}
 	c.SetDeadline(time.Time{})
-	return stats.NewCountingConn(c, st, true), nil
+	return c, nil
+}
+
+func readSocks5Reply(r io.Reader) error {
+	var header [4]byte
+	if _, err := io.ReadFull(r, header[:]); err != nil {
+		return fmt.Errorf("core socks connect reply: %w", err)
+	}
+	if header[0] != 5 {
+		return fmt.Errorf("core socks connect reply has version %d", header[0])
+	}
+	if header[1] != 0 {
+		return fmt.Errorf("core socks connect failed: rep=%d", header[1])
+	}
+	var addressLen int
+	switch header[3] {
+	case 1:
+		addressLen = 4
+	case 3:
+		var length [1]byte
+		if _, err := io.ReadFull(r, length[:]); err != nil {
+			return fmt.Errorf("core socks domain length: %w", err)
+		}
+		addressLen = int(length[0])
+	case 4:
+		addressLen = 16
+	default:
+		return fmt.Errorf("core socks connect reply has address type %d", header[3])
+	}
+	if _, err := io.CopyN(io.Discard, r, int64(addressLen+2)); err != nil {
+		return fmt.Errorf("core socks connect reply address: %w", err)
+	}
+	return nil
 }
 
 // serveSocks5 implements a minimal SOCKS5 CONNECT server.
@@ -155,6 +232,17 @@ func serveSocks5(c net.Conn, dial func(string) (net.Conn, error), st *stats.Stat
 	}
 	methods := make([]byte, int(hdr[1]))
 	if _, err := io.ReadFull(c, methods); err != nil {
+		return
+	}
+	noAuth := false
+	for _, method := range methods {
+		if method == 0 {
+			noAuth = true
+			break
+		}
+	}
+	if !noAuth {
+		_, _ = c.Write([]byte{5, 0xff})
 		return
 	}
 	if _, err := c.Write([]byte{5, 0}); err != nil { // no-auth
@@ -208,7 +296,7 @@ func serveSocks5(c net.Conn, dial func(string) (net.Conn, error), st *stats.Stat
 		return
 	}
 	c.SetDeadline(time.Time{})
-	uc := stats.NewCountingConn(c, st, false)
+	uc := stats.NewCountingConn(c, st, true)
 	splice(uc, up)
 }
 
@@ -232,11 +320,15 @@ func serveHTTPConnect(c net.Conn, dial func(string) (net.Conn, error), st *stats
 		return
 	}
 	c.SetDeadline(time.Time{})
-	uc := stats.NewCountingConn(c, st, false)
+	uc := stats.NewCountingConn(c, st, true)
 	// br may hold buffered tunnel bytes; drain them into the upstream.
 	if br.Buffered() > 0 {
 		peek, _ := br.Peek(br.Buffered())
-		if _, err := up.Write(peek); err != nil {
+		n, err := up.Write(peek)
+		if n > 0 {
+			st.Add(true, int64(n))
+		}
+		if err != nil || n != len(peek) {
 			return
 		}
 	}

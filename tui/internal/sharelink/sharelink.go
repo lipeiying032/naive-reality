@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -27,21 +28,22 @@ func Parse(link string) (*config.Profile, error) {
 		return nil, fmt.Errorf("parse link: %w", err)
 	}
 	scheme := strings.ToLower(u.Scheme)
-	if scheme != "naivereal" && !(scheme == "naive" && u.Host == "https") && !(scheme == "naive+https") {
+	if scheme != "naivereal" && scheme != "naive+https" {
 		return nil, fmt.Errorf("unsupported scheme %q (want naivereal:// or naive+https://)", u.Scheme)
 	}
-	host := u.Host
+	host := u.Hostname()
 	var username, password string
 	if u.User != nil {
 		username = u.User.Username()
 		password, _ = u.User.Password()
 	}
 	port := 443
-	if i := strings.LastIndex(host, ":"); i >= 0 {
-		if p, err := strconv.Atoi(host[i+1:]); err == nil {
-			port = p
-			host = host[:i]
+	if portString := u.Port(); portString != "" {
+		parsedPort, err := strconv.Atoi(portString)
+		if err != nil || parsedPort < 1 || parsedPort > 65535 {
+			return nil, fmt.Errorf("invalid port %q", portString)
 		}
+		port = parsedPort
 	}
 	if host == "" {
 		return nil, fmt.Errorf("missing host")
@@ -86,26 +88,49 @@ func Parse(link string) (*config.Profile, error) {
 
 // Build renders a profile as a share link (naivereal:// when reality is set).
 func Build(p *config.Profile) (string, error) {
+	if strings.TrimSpace(p.Server) == "" {
+		return "", fmt.Errorf("missing server")
+	}
+	port := p.Port
+	if port == 0 {
+		port = 443
+	}
+	if port < 1 || port > 65535 {
+		return "", fmt.Errorf("invalid port %d", port)
+	}
 	host := p.Server
 	if p.Port != 0 && p.Port != 443 {
-		host = fmt.Sprintf("%s:%d", host, p.Port)
+		host = net.JoinHostPort(host, strconv.Itoa(port))
+	} else if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+		host = "[" + host + "]"
 	}
-	userinfo := ""
+	u := &url.URL{Host: host, Fragment: p.Name}
 	if p.Username != "" || p.Password != "" {
-		userinfo = url.UserPassword(p.Username, p.Password).String() + "@"
+		u.User = url.UserPassword(p.Username, p.Password)
 	}
 	q := url.Values{}
-	fragment := url.PathEscape(p.Name)
 	if p.Reality != nil {
+		if strings.TrimSpace(p.Reality.ServerName) == "" {
+			return "", fmt.Errorf("missing reality server_name")
+		}
+		if err := validatePublicKey(p.Reality.PublicKey); err != nil {
+			return "", err
+		}
+		if err := validateShortID(p.Reality.ShortID); err != nil {
+			return "", err
+		}
+		u.Scheme = "naivereal"
 		q.Set("server_name", p.Reality.ServerName)
 		q.Set("public_key", p.Reality.PublicKey)
 		q.Set("short_id", p.Reality.ShortID)
 		if p.Reality.Fingerprint != "" && p.Reality.Fingerprint != "chrome" {
 			q.Set("fingerprint", p.Reality.Fingerprint)
 		}
-		return fmt.Sprintf("naivereal://%s%s?%s#%s", userinfo, host, q.Encode(), fragment), nil
+		u.RawQuery = q.Encode()
+		return u.String(), nil
 	}
-	return fmt.Sprintf("naive+https://%s%s?%s#%s", userinfo, host, q.Encode(), fragment), nil
+	u.Scheme = "naive+https"
+	return u.String(), nil
 }
 
 func validatePublicKey(s string) error {

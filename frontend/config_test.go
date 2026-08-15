@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -70,6 +71,34 @@ func TestConfigValidationErrors(t *testing.T) {
 	p = write("bad_mode.toml", "[inbound]\nmode = \"bogus\"\n")
 	if _, err := LoadConfig(p); err == nil {
 		t.Error("bogus mode should fail")
+	}
+}
+
+func TestConfigRejectsUnsafeOrAmbiguousSettings(t *testing.T) {
+	dir := t.TempDir()
+	validReality := "[inbound]\nmode = \"reality\"\n[inbound.reality]\nprivate_key = \"mOkR9JS7u0vfLCUQjf6kE_NOWJvNf4VCNYb9A1wK_Ek\"\nserver_names = [\"x.com\"]\nshort_ids = [\"abcd\"]\n"
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"missing short IDs", strings.Replace(validReality, "short_ids = [\"abcd\"]\n", "", 1), "short_ids"},
+		{"invalid target", validReality + "target = \"x.com\"\n", "target"},
+		{"negative connection limit", validReality + "[limits]\nmax_connections = -1\n", "max_connections"},
+		{"status without token", validReality + "[status]\nhttp = \"127.0.0.1:9090\"\n", "status.token"},
+		{"unknown log level", "log_level = \"trace\"\n" + validReality, "log_level"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(dir, strings.ReplaceAll(tt.name, " ", "_")+".toml")
+			if err := os.WriteFile(path, []byte(tt.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := LoadConfig(path)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want substring %q", err, tt.want)
+			}
+		})
 	}
 }
 

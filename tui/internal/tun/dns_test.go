@@ -63,6 +63,35 @@ func TestBuildResponseRoundtrip(t *testing.T) {
 	}
 }
 
+func TestBuildResponseDropsEDNSBeforeAnswers(t *testing.T) {
+	q := buildQuery(t, "example.com", qtypeA)
+	// Add a root-name OPT pseudo-record and advertise it in ARCOUNT.
+	binary.BigEndian.PutUint16(q[10:], 1)
+	q = append(q, 0, 0, 41, 0x10, 0, 0, 0, 0, 0, 0)
+	resp, err := buildResponse(q, []net.IP{net.ParseIP("93.184.216.34")}, 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := binary.BigEndian.Uint16(resp[10:]); got != 0 {
+		t.Fatalf("ARCOUNT = %d, want 0", got)
+	}
+	ips, err := parseAnswers(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ips) != 1 || !ips[0].Equal(net.ParseIP("93.184.216.34")) {
+		t.Fatalf("answers: %v", ips)
+	}
+}
+
+func TestParseQueryRejectsMultipleQuestions(t *testing.T) {
+	q := buildQuery(t, "example.com", qtypeA)
+	binary.BigEndian.PutUint16(q[4:], 2)
+	if _, _, _, err := parseQuery(q); err == nil {
+		t.Fatal("multiple questions should be rejected")
+	}
+}
+
 func TestParseAnswersAAAA(t *testing.T) {
 	resp, err := buildResponse(buildQuery(t, "example.com", qtypeAAAA), []net.IP{net.ParseIP("2606:2800:220:1:248:1893:25c8:1946")}, 60)
 	if err != nil {
