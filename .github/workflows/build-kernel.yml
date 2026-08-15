@@ -19,6 +19,7 @@ on:
         options:
           - all
           - reality-e2e
+          - arm64
   release:
     types: [published]
 
@@ -41,7 +42,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: ${{ fromJSON(inputs.target == 'reality-e2e' && '["x64"]' || '["x64", "arm64"]') }}
+        arch: ${{ fromJSON(inputs.target == 'reality-e2e' && '["x64"]' || inputs.target == 'arm64' && '["arm64"]' || '["x64", "arm64"]') }}
     env:
       EXTRA_FLAGS: 'target_cpu="${{ matrix.arch }}"'
       BUNDLE: naivereal-${{ github.event.release.tag_name || 'kernel' }}-${{ github.job }}-${{ matrix.arch }}
@@ -115,7 +116,11 @@ jobs:
           ccache -s && ccache --evict-older-than 1d
       - name: Verify REALITY patch is in the binary
         working-directory: upstream/src
-        run: out/Release/naive --help 2>&1 | grep -q -- '--reality-public-key'
+        run: |
+          file out/Release/naive
+          # target_cpu=arm64 is a cross binary on the x64 runner, so
+          # grep the flag string in the binary instead of executing it.
+          grep -aq -- '--reality-public-key' out/Release/naive
       - name: Basic test
         working-directory: upstream/src
         run: ../tests/basic.sh out/Release/naive
@@ -139,7 +144,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   windows:
-    if: ${{ inputs.target != 'reality-e2e' }}
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.target == 'all' }}
     runs-on: windows-2022
     env:
       EXTRA_FLAGS: 'target_cpu="x64"'
@@ -193,7 +198,7 @@ jobs:
           ~/.cargo/bin/sccache -s
       - name: Verify REALITY patch is in the binary
         working-directory: upstream/src
-        run: out/Release/naive.exe --help 2>&1 | grep -q -- '--reality-public-key'
+        run: grep -aq -- '--reality-public-key' out/Release/naive.exe
       - name: Basic test
         working-directory: upstream/src
         run: ../tests/basic.sh out/Release/naive
@@ -218,6 +223,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   reality-e2e:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.target != 'arm64' }}
     # REALITY full-chain test: patched kernel (client, reality flags) ->
     # naivereal-frontend (reality mode) -> official naive server -> internet.
     needs: linux
