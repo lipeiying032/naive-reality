@@ -363,7 +363,7 @@ index 0000000..ec50250
 +      !SSL_set_max_proto_version(ssl, TLS1_3_VERSION) ||
 +      !SSL_set1_group_ids(ssl, &kX25519, 1) ||
 +      !SSL_set1_client_key_shares(ssl, &kX25519, 1) ||
-+      !SSL_set_alpn_protos(ssl, kH2Alpn, sizeof(kH2Alpn))) {
++      SSL_set_alpn_protos(ssl, kH2Alpn, sizeof(kH2Alpn)) != 0) {
 +    return 0;
 +  }
 +  SSL_set_options(ssl, SSL_OP_NO_TICKET);
