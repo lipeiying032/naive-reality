@@ -1,0 +1,461 @@
+diff --git a/net/base/net_error_list.h b/net/base/net_error_list.h
+index dbfe279..335f554 100644
+--- a/net/base/net_error_list.h
++++ b/net/base/net_error_list.h
+@@ -984,6 +984,12 @@ NET_ERROR(HTTPENGINE_PROVIDER_IN_USE, -508)
+ // )
+ // LINT.IfChange
+ 
++// The REALITY client reached the real target site: the server certificate is
++// not the REALITY server's self-signed Ed25519 certificate, but it verifies
++// normally for the SNI. This is the spider-mode trigger (naive only).
++// (Fork-specific addition; see patches/README.md.)
++NET_ERROR(REALITY_REAL_TARGET, -509)
++
+ // *** Code -600 is reserved (was FTP_PASV_COMMAND_FAILED). ***
+ // *** Code -601 is reserved (was FTP_FAILED). ***
+ // *** Code -602 is reserved (was FTP_SERVICE_UNAVAILABLE). ***
+diff --git a/net/socket/reality_config.cc b/net/socket/reality_config.cc
+new file mode 100644
+index 0000000..49c2da3
+--- /dev/null
++++ b/net/socket/reality_config.cc
+@@ -0,0 +1,38 @@
++// Copyright 2025. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "net/socket/reality_config.h"
++
++#include <utility>
++
++namespace net {
++namespace {
++
++// naive.exe runs a single IO message loop, so no locking is needed (this
++// mirrors the existing g_duplicate_switch_collector pattern in
++// net/tools/naive/naive_command_line.cc).
++std::optional<RealityConfig> g_reality_config;
++bool g_reality_suspended = false;
++
++}  // namespace
++
++void SetRealityConfig(std::optional<RealityConfig> config) {
++  g_reality_config = std::move(config);
++}
++
++const RealityConfig* GetRealityConfig() {
++  if (g_reality_suspended) {
++    return nullptr;
++  }
++  if (g_reality_config.has_value()) {
++    return &g_reality_config.value();
++  }
++  return nullptr;
++}
++
++void SetRealityConfigSuspended(bool suspended) {
++  g_reality_suspended = suspended;
++}
++
++}  // namespace net
+diff --git a/net/socket/reality_config.h b/net/socket/reality_config.h
+new file mode 100644
+index 0000000..001771c
+--- /dev/null
++++ b/net/socket/reality_config.h
+@@ -0,0 +1,43 @@
++// Copyright 2025. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef NET_SOCKET_REALITY_CONFIG_H_
++#define NET_SOCKET_REALITY_CONFIG_H_
++
++#include <array>
++#include <cstdint>
++#include <optional>
++#include <string>
++
++#include "net/base/net_export.h"
++
++namespace net {
++
++// REALITY client configuration (see patches/README.md). It is applied to every
++// SSLClientSocketImpl connection; naive.exe is single-threaded and only makes
++// proxy TLS connections in its normal mode, so a process-wide value is
++// sufficient (documented assumption; see README.md).
++struct NET_EXPORT RealityConfig {
++  // SNI presented in the ClientHello (the "target" server name).
++  std::string server_name;
++  // Server static X25519 public key (32 bytes).
++  std::array<uint8_t, 32> public_key;
++  // Right-zero-padded short id (8 bytes).
++  std::array<uint8_t, 8> short_id;
++};
++
++// Installs or clears the process-wide REALITY config. A nullopt disables
++// REALITY. The value is copied.
++NET_EXPORT void SetRealityConfig(std::optional<RealityConfig> config);
++
++// Returns the active config, or nullptr when unset or suspended.
++NET_EXPORT const RealityConfig* GetRealityConfig();
++
++// Temporarily suspends REALITY. Spider mode uses this to issue a single
++// ordinary-TLS fetch to the real target site.
++NET_EXPORT void SetRealityConfigSuspended(bool suspended);
++
++}  // namespace net
++
++#endif  // NET_SOCKET_REALITY_CONFIG_H_
+diff --git a/net/socket/ssl_client_socket_impl.cc b/net/socket/ssl_client_socket_impl.cc
+index b3d4cb9..9b3b6ac 100644
+--- a/net/socket/ssl_client_socket_impl.cc
++++ b/net/socket/ssl_client_socket_impl.cc
+@@ -54,6 +54,7 @@
+ #include "net/log/net_log_event_type.h"
+ #include "net/log/net_log_values.h"
+ #include "net/net_buildflags.h"
++#include "net/socket/reality_config.h"
+ #include "net/ssl/cert_compression.h"
+ #include "net/ssl/openssl_ssl_util.h"
+ #include "net/ssl/ssl_cert_request_info.h"
+@@ -69,6 +70,7 @@
+ #include "third_party/boringssl/src/include/openssl/err.h"
+ #include "third_party/boringssl/src/include/openssl/evp.h"
+ #include "third_party/boringssl/src/include/openssl/mem.h"
++#include "third_party/boringssl/src/include/openssl/pool.h"
+ #include "third_party/boringssl/src/include/openssl/ssl.h"
+ 
+ namespace net {
+@@ -690,6 +692,14 @@ int SSLClientSocketImpl::Init() {
+     return ERR_UNEXPECTED;
+   }
+ 
++  const RealityConfig* reality_config = GetRealityConfig();
++  if (reality_config != nullptr && !reality_config->server_name.empty() &&
++      !SSL_set_tlsext_host_name(ssl_.get(),
++                                reality_config->server_name.c_str())) {
++    // REALITY presents the configured target server_name, not the proxy host.
++    return ERR_UNEXPECTED;
++  }
++
+   const std::vector<uint16_t> supported_groups =
+       context_->config().GetSupportedGroups();
+   if (!SSL_set1_group_ids(ssl_.get(), supported_groups.data(),
+@@ -907,6 +917,18 @@ int SSLClientSocketImpl::Init() {
+     return ERR_UNEXPECTED;
+   }
+ 
++  // REALITY (experimental): applied last so its protocol restrictions (TLS 1.3
++  // only, X25519-only key shares, h2 ALPN, no tickets/PSK) override the
++  // defaults configured above. SSL_set1_reality_config is provided by the
++  // patched BoringSSL (patches/001-boringssl-reality.patch).
++  if (reality_config != nullptr) {
++    if (!SSL_set1_reality_config(ssl_.get(), reality_config->public_key.data(),
++                                 reality_config->short_id.data())) {
++      return ERR_UNEXPECTED;
++    }
++    reality_configured_ = true;
++  }
++
+   return OK;
+ }
+ 
+@@ -1093,8 +1115,9 @@ ssl_verify_result_t SSLClientSocketImpl::VerifyCert() {
+   // In this configuration, BoringSSL will perform exactly one certificate
+   // verification, so there cannot be state from a previous verification.
+   CHECK(!server_cert_);
++  const STACK_OF(CRYPTO_BUFFER)* chain = SSL_get0_peer_certificates(ssl_.get());
+   server_cert_ = x509_util::CreateX509CertificateFromBuffers(
+-      SSL_get0_peer_certificates(ssl_.get()));
++      chain);
+ 
+   // OpenSSL decoded the certificate, but the X509Certificate implementation
+   // could not. This is treated as a fatal SSL-level protocol error rather than
+@@ -1104,6 +1127,23 @@ ssl_verify_result_t SSLClientSocketImpl::VerifyCert() {
+     return ssl_verify_invalid;
+   }
+ 
++  // REALITY: check the leaf certificate against the AuthKey derived during the
++  // ClientHello build. If it matches, the peer is the REALITY server and normal
++  // chain verification is skipped. Otherwise fall through to normal
++  // verification: if the chain verifies for the SNI, the client reached the
++  // real target site (see HandleVerifyResult).
++  if (reality_configured_ && chain != nullptr &&
++      sk_CRYPTO_BUFFER_num(chain) > 0) {
++    const CRYPTO_BUFFER* leaf = sk_CRYPTO_BUFFER_value(chain, 0);
++    if (SSL_reality_verify_certificate(ssl_.get(), CRYPTO_BUFFER_data(leaf),
++                                       CRYPTO_BUFFER_len(leaf))) {
++      server_cert_verify_result_.Reset();
++      server_cert_verify_result_.verified_cert = server_cert_;
++      cert_verification_result_ = OK;
++      return HandleVerifyResult();
++    }
++  }
++
+   net_log_.AddEvent(NetLogEventType::SSL_CERTIFICATES_RECEIVED, [&] {
+     return base::DictValue().Set("certificates",
+                                  NetLogX509CertificateList(server_cert_.get()));
+@@ -1264,6 +1304,13 @@ ssl_verify_result_t SSLClientSocketImpl::HandleVerifyResult() {
+   }
+ 
+   if (result == OK) {
++    if (reality_configured_) {
++      // The certificate verifies for the SNI but is not the REALITY server:
++      // the connection was intercepted/redirected to the real target site.
++      // This distinctive error is the spider-mode trigger.
++      OpenSSLPutNetError(FROM_HERE, ERR_REALITY_REAL_TARGET);
++      return ssl_verify_invalid;
++    }
+     return ssl_verify_ok;
+   }
+ 
+diff --git a/net/socket/ssl_client_socket_impl.h b/net/socket/ssl_client_socket_impl.h
+index ef87745..757dde9 100644
+--- a/net/socket/ssl_client_socket_impl.h
++++ b/net/socket/ssl_client_socket_impl.h
+@@ -289,6 +289,9 @@ class NET_EXPORT_PRIVATE SSLClientSocketImpl
+   // True if certificate verification used an ECH name override.
+   bool used_ech_name_override_ = false;
+ 
++  // True if REALITY mode was applied to this connection's handshake.
++  bool reality_configured_ = false;
++
+   NextProto negotiated_protocol_ = NextProto::kProtoUnknown;
+ 
+   // Set to true if a CertificateRequest was received.
+diff --git a/net/tools/naive/naive_config.cc b/net/tools/naive/naive_config.cc
+index fbbd06d..7897ab4 100644
+--- a/net/tools/naive/naive_config.cc
++++ b/net/tools/naive/naive_config.cc
+@@ -25,6 +25,118 @@ ProxyServer MyProxyUriToProxyServer(std::string_view uri) {
+ }
+ }  // namespace
+ 
++namespace {
++
++// RFC 4648 section 5 base64url decode. Accepts optional trailing '=' padding.
++bool Base64UrlDecode(std::string_view input, std::string* output) {
++  output->clear();
++  size_t len = input.size();
++  while (len > 0 && input[len - 1] == '=') {
++    --len;
++  }
++  if (len % 4 == 1) {
++    return false;
++  }
++  auto DecodeChar = [](unsigned char c) -> int {
++    if (c >= 'A' && c <= 'Z') {
++      return c - 'A';
++    }
++    if (c >= 'a' && c <= 'z') {
++      return c - 'a' + 26;
++    }
++    if (c >= '0' && c <= '9') {
++      return c - '0' + 52;
++    }
++    if (c == '-') {
++      return 62;
++    }
++    if (c == '_') {
++      return 63;
++    }
++    return -1;
++  };
++  int quartet[4];
++  int qlen = 0;
++  for (size_t i = 0; i < len; ++i) {
++    int v = DecodeChar(static_cast<unsigned char>(input[i]));
++    if (v < 0) {
++      return false;
++    }
++    quartet[qlen++] = v;
++    if (qlen == 4) {
++      output->push_back(
++          static_cast<char>((quartet[0] << 2) | (quartet[1] >> 4)));
++      output->push_back(
++          static_cast<char>((quartet[1] << 4) | (quartet[2] >> 2)));
++      output->push_back(static_cast<char>((quartet[2] << 6) | quartet[3]));
++      qlen = 0;
++    }
++  }
++  if (qlen == 2) {
++    output->push_back(static_cast<char>((quartet[0] << 2) | (quartet[1] >> 4)));
++  } else if (qlen == 3) {
++    output->push_back(static_cast<char>((quartet[0] << 2) | (quartet[1] >> 4)));
++    output->push_back(static_cast<char>((quartet[1] << 4) | (quartet[2] >> 2)));
++  }
++  return true;
++}
++
++bool HexDecode(std::string_view input, std::string* output) {
++  output->clear();
++  if (input.size() % 2 != 0) {
++    return false;
++  }
++  auto Nibble = [](unsigned char c) -> int {
++    if (c >= '0' && c <= '9') {
++      return c - '0';
++    }
++    if (c >= 'a' && c <= 'f') {
++      return c - 'a' + 10;
++    }
++    if (c >= 'A' && c <= 'F') {
++      return c - 'A' + 10;
++    }
++    return -1;
++  };
++  for (size_t i = 0; i < input.size(); i += 2) {
++    int hi = Nibble(static_cast<unsigned char>(input[i]));
++    int lo = Nibble(static_cast<unsigned char>(input[i + 1]));
++    if (hi < 0 || lo < 0) {
++      return false;
++    }
++    output->push_back(static_cast<char>((hi << 4) | lo));
++  }
++  return true;
++}
++
++bool ParseRealityPublicKey(std::string_view str, RealityConfig* out) {
++  std::string decoded;
++  if (!Base64UrlDecode(str, &decoded) || decoded.size() != 32) {
++    std::cerr << "Invalid reality public key (expected 32 bytes base64url)"
++              << std::endl;
++    return false;
++  }
++  std::copy(decoded.begin(), decoded.end(), out->public_key.begin());
++  return true;
++}
++
++bool ParseRealityShortId(std::string_view str, RealityConfig* out) {
++  if (str.size() > 16) {
++    std::cerr << "Invalid reality short id (at most 16 hex chars)" << std::endl;
++    return false;
++  }
++  std::string decoded;
++  if (!HexDecode(str, &decoded)) {
++    std::cerr << "Invalid reality short id (hex required)" << std::endl;
++    return false;
++  }
++  out->short_id.fill(0);
++  std::copy(decoded.begin(), decoded.end(), out->short_id.begin());
++  return true;
++}
++
++}  // namespace
++
+ NaiveListenConfig::NaiveListenConfig() = default;
+ NaiveListenConfig::NaiveListenConfig(const NaiveListenConfig&) = default;
+ NaiveListenConfig::~NaiveListenConfig() = default;
+@@ -321,6 +433,54 @@ bool NaiveConfig::Parse(const base::DictValue& value) {
+     no_post_quantum = true;
+   }
+ 
++  // REALITY client mode. Supports both a nested "reality" object in config.json
++  // and flat --reality-* command-line flags (surfaced as flat keys by
++  // GetSwitchesAsValue in naive_command_line.cc).
++  RealityConfig parsed_reality;
++  bool reality_present = false;
++  if (const base::Value* v = value.Find("reality")) {
++    if (const base::DictValue* d = v->GetIfDict()) {
++      if (const std::string* s = d->FindString("server_name")) {
++        parsed_reality.server_name = *s;
++      }
++      if (const std::string* s = d->FindString("public_key")) {
++        if (!ParseRealityPublicKey(*s, &parsed_reality)) {
++          return false;
++        }
++        reality_present = true;
++      }
++      if (const std::string* s = d->FindString("short_id")) {
++        if (!ParseRealityShortId(*s, &parsed_reality)) {
++          return false;
++        }
++      }
++    } else {
++      std::cerr << "Invalid reality" << std::endl;
++      return false;
++    }
++  }
++  if (const std::string* s = value.FindString("reality-server-name")) {
++    parsed_reality.server_name = *s;
++  }
++  if (const std::string* s = value.FindString("reality-public-key")) {
++    if (!ParseRealityPublicKey(*s, &parsed_reality)) {
++      return false;
++    }
++    reality_present = true;
++  }
++  if (const std::string* s = value.FindString("reality-short-id")) {
++    if (!ParseRealityShortId(*s, &parsed_reality)) {
++      return false;
++    }
++  }
++  if (reality_present) {
++    if (parsed_reality.server_name.empty()) {
++      std::cerr << "Invalid reality: missing server_name" << std::endl;
++      return false;
++    }
++    reality = std::move(parsed_reality);
++  }
++
+   return true;
+ }
+ 
+diff --git a/net/tools/naive/naive_config.h b/net/tools/naive/naive_config.h
+index 2e5184e..7f7c025 100644
+--- a/net/tools/naive/naive_config.h
++++ b/net/tools/naive/naive_config.h
+@@ -20,6 +20,7 @@
+ #include "net/base/ip_address.h"
+ #include "net/base/proxy_chain.h"
+ #include "net/http/http_request_headers.h"
++#include "net/socket/reality_config.h"
+ #include "net/tools/naive/naive_protocol.h"
+ #include "url/scheme_host_port.h"
+ 
+@@ -72,6 +73,8 @@ struct NaiveConfig {
+ 
+   std::optional<bool> no_post_quantum;
+ 
++  std::optional<RealityConfig> reality;
++
+   NaiveConfig();
+   NaiveConfig(const NaiveConfig&);
+   ~NaiveConfig();
+diff --git a/net/tools/naive/naive_proxy_bin.cc b/net/tools/naive/naive_proxy_bin.cc
+index 655a46e..73c3799 100644
+--- a/net/tools/naive/naive_proxy_bin.cc
++++ b/net/tools/naive/naive_proxy_bin.cc
+@@ -57,6 +57,7 @@
+ #include "net/proxy_resolution/proxy_config_with_annotation.h"
+ #include "net/socket/client_socket_pool.h"
+ #include "net/socket/client_socket_pool_manager.h"
++#include "net/socket/reality_config.h"
+ #include "net/socket/ssl_client_socket.h"
+ #include "net/socket/tcp_server_socket.h"
+ #include "net/socket/udp_server_socket.h"
+@@ -427,6 +428,10 @@ int main(int argc, char* argv[]) {
+                  "--log-net-log=<path>       Save NetLog\n"
+                  "--ssl-key-log-file=<path>  Save SSL keys for Wireshark\n"
+                  "--no-post-quantum          No post-quantum key agreement\n"
++                 "--reality-server-name=<host> REALITY SNI (target server)\n"
++                 "--reality-public-key=<b64url> REALITY server static public\n"
++                 "                           key (32 bytes, base64url)\n"
++                 "--reality-short-id=<hex>    REALITY short id (<=16 hex)\n"
+               << std::endl;
+     exit(EXIT_SUCCESS);
+   }
+@@ -442,6 +447,11 @@ int main(int argc, char* argv[]) {
+   }
+   CHECK(logging::InitLogging(config.log));
+ 
++  // Install REALITY mode (if configured) so every SSLClientSocketImpl applies
++  // it. naive.exe only makes proxy TLS connections in normal operation, so a
++  // process-wide config is acceptable (see patches/README.md).
++  net::SetRealityConfig(config.reality);
++
+   if (!config.ssl_key_log_file.empty()) {
+     net::SSLClientSocket::SetSSLKeyLogger(
+         std::make_unique<net::SSLKeyLoggerImpl>(config.ssl_key_log_file));

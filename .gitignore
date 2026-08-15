@@ -1,0 +1,12 @@
+# binaries
+*.exe
+*.test
+/release-windows/
+/release-linux/
+*.zip
+*.tar.xz
+
+# naive kernel / upstream (fetched at build time)
+/naive.exe
+/upstream/
+/src/

@@ -1,0 +1,15 @@
+[Unit]
+Description=naivereal naive proxy server (official kernel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Official naive server on 127.0.0.1:8080. Set your own credentials!
+ExecStart=/usr/local/bin/naive --listen=http://user:pass@127.0.0.1:8080
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

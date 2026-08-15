@@ -1,0 +1,15 @@
+[Unit]
+Description=naivereal REALITY frontend
+After=naivereal.service
+Requires=naivereal.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/naivereal-frontend /etc/naivereal/frontend.toml
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,39 @@
+{
+  "name": "naive-reality-client",
+  "description": "Adds a REALITY client mode (XTLS/REALITY wire format) to the naiveproxy fork so the https proxy connection uses REALITY instead of plain TLS.",
+  "wire_format": "Follows Xray's REALITY protocol (transport/internet/reality/reality.go UClient). No GPL/MPL code was copied; everything is implemented from the protocol description in README.md.",
+  "patches": [
+    {
+      "file": "001-boringssl-reality.patch",
+      "target": "boringssl tree (E:\\deepseekwork\\boringssl)",
+      "apply_with": "git apply (or: patch -p1) from the boringssl root",
+      "description": "BoringSSL: new ssl/reality.cc + ssl/reality.h, public API SSL_set1_reality_config/SSL_clear_reality_config/SSL_reality_verify_certificate, ssl_st fields, ClientHello session-id patch hook, build registration."
+    },
+    {
+      "file": "002-net-reality-plumbing.patch",
+      "target": "naivereal src tree (E:\\deepseekwork\\naivereal\\src)",
+      "apply_with": "git apply (or: patch -p1) from the src root",
+      "depends_on": ["001-boringssl-reality.patch"],
+      "description": "net: RealityConfig global (net/socket/reality_config.{h,cc}), SSLClientSocketImpl wiring (SNI override + SSL_set1_reality_config + REALITY cert check + distinctive ERR_REALITY_REAL_TARGET), new net error -509, naive config.json/CLI parsing."
+    },
+    {
+      "file": "003-spider-mode.patch",
+      "target": "naivereal src tree",
+      "apply_with": "git apply (or: patch -p1) from the src root",
+      "depends_on": ["002-net-reality-plumbing.patch"],
+      "description": "net/tools/naive: spider mode - on ERR_REALITY_REAL_TARGET, log and issue one ordinary-TLS GET to https://<server_name>/ via PreambleGetter, then fail."
+    },
+    {
+      "file": "004-net-build-registration.patch",
+      "target": "naivereal src tree",
+      "apply_with": "git apply (or: patch -p1) from the src root",
+      "depends_on": ["002-net-reality-plumbing.patch"],
+      "description": "Registers net/socket/reality_config.{cc,h} in src/net/BUILD.gn. IMPORTANT: naiveproxy's tree has NO net/socket/BUILD.gn - all net sources are listed flat in src/net/BUILD.gn."
+    }
+  ],
+  "build_notes": [
+    "001 edits build.json (authoritative source list) and the generated gen/sources.{gni,cmake,bzl,mk}. If the CI regenerates from build.json (go run ./util/pregenerate), the generated-file edits are redundant but harmless.",
+    "Chromium consumes boringssl via third_party/boringssl/BUILD.gn, which imports gen/sources.gni and references ssl_sources / ssl_internal_headers. That BUILD.gn is NOT in the naiveproxy git tree; no edit is needed there because the new files are added to the lists it already imports.",
+    "002/003 add net/socket/reality_config.{h,cc}; 004 registers them in src/net/BUILD.gn (verified: upstream naiveproxy has no net/socket/BUILD.gn; socket sources are listed flat in net/BUILD.gn around line 1015)."
+  ]
+}
