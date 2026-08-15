@@ -13,6 +13,13 @@ on:
   release:
     types: [published]
 
+# All run steps use bash: the patch-apply scripts are POSIX shell,
+# and upstream's own workflow does the same (Git Bash is present on
+# windows runners).
+defaults:
+  run:
+    shell: bash
+
 env:
   CACHE_EPOCH: 1
   CCACHE_MAXSIZE: 200M
