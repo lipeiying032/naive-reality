@@ -106,7 +106,7 @@ diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
 index 0b91e5d..c016dcb 100644
 --- a/include/openssl/ssl.h
 +++ b/include/openssl/ssl.h
-@@ -2763,6 +2763,34 @@ OPENSSL_EXPORT int SSL_set1_client_key_shares(SSL *ssl,
+@@ -2763,6 +2763,35 @@ OPENSSL_EXPORT int SSL_set1_client_key_shares(SSL *ssl,
  OPENSSL_EXPORT int SSL_set1_server_supported_groups_hint(
      SSL *ssl, const uint16_t *server_groups, size_t num_server_groups);
  
@@ -116,8 +116,9 @@ index 0b91e5d..c016dcb 100644
 +// (https://github.com/XTLS/REALITY) for its outbound handshake. |public_key|
 +// is the server's static X25519 public key (32 bytes) and |short_id| is the
 +// right-zero-padded 8-byte short id. When set, the client restricts the
-+// handshake to TLS 1.3, restricts key shares to X25519, offers only the h2
-+// ALPN protocol, disables session tickets/PSK, and replaces the legacy session
++// handshake to TLS 1.3, restricts key shares to X25519, preserves any ALPN
++// configuration already set on |ssl|, disables session tickets/PSK, and
++// replaces the legacy session
 +// id in the ClientHello with an authenticated-encryption blob. It returns one
 +// on success and zero on failure (including when |ssl| is a server).
 +OPENSSL_EXPORT int SSL_set1_reality_config(SSL *ssl,
@@ -254,7 +255,7 @@ index 0000000..ec50250
 +        !key_share->SerializePrivateKey(cbb.get())) {
 +      return false;
 +    }
-+    const uint8_t *data;
++    uint8_t *data;
 +    size_t len;
 +    if (!CBB_finish(cbb.get(), &data, &len) || len != 32) {
 +      return false;
@@ -327,7 +328,7 @@ index 0000000..ec50250
 +  }
 +  // The legacy session id is at offset 39: 4-byte handshake header, 2-byte
 +  // legacy_version, 32-byte random, then the 1-byte session-id length prefix.
-+  if (msg.size() < 39 + 32) {
++  if (msg.size() < 39 + 32 || hs->session_id.size() != 32) {
 +    OPENSSL_PUT_ERROR(SSL, ERR_R_INTERNAL_ERROR);
 +    return false;
 +  }
@@ -343,6 +344,7 @@ index 0000000..ec50250
 +    return false;
 +  }
 +  OPENSSL_memcpy(msg.data() + 39, sealed, sizeof(sealed));
++  OPENSSL_memcpy(hs->session_id.data(), sealed, sizeof(sealed));
 +
 +  OPENSSL_memcpy(ssl->reality_auth_key, auth_key, sizeof(auth_key));
 +  ssl->reality_auth_key_set = true;
@@ -358,18 +360,16 @@ index 0000000..ec50250
 +    return 0;
 +  }
 +  static const uint16_t kX25519 = SSL_GROUP_X25519;
-+  static const uint8_t kH2Alpn[] = {2, 'h', '2'};
 +  if (!SSL_set_min_proto_version(ssl, TLS1_3_VERSION) ||
 +      !SSL_set_max_proto_version(ssl, TLS1_3_VERSION) ||
 +      !SSL_set1_group_ids(ssl, &kX25519, 1) ||
-+      !SSL_set1_client_key_shares(ssl, &kX25519, 1) ||
-+      !SSL_set_alpn_protos(ssl, kH2Alpn, sizeof(kH2Alpn))) {
++      !SSL_set1_client_key_shares(ssl, &kX25519, 1)) {
 +    return 0;
 +  }
 +  SSL_set_options(ssl, SSL_OP_NO_TICKET);
 +
-+  OPENSSL_memcpy(ssl->reality_public_key, public_key, 32);
-+  OPENSSL_memcpy(ssl->reality_short_id, short_id, 8);
++  bssl::OPENSSL_memcpy(ssl->reality_public_key, public_key, 32);
++  bssl::OPENSSL_memcpy(ssl->reality_short_id, short_id, 8);
 +  ssl->reality_configured = true;
 +  ssl->reality_auth_key_set = false;
 +  return 1;
@@ -471,3 +471,24 @@ index 0000000..f7794a5
 +}  // namespace bssl
 +
 +#endif  // OPENSSL_HEADER_SSL_REALITY_H
+diff --git a/ssl/extensions.cc b/ssl/extensions.cc
+index 3697e7abd..d45ca284f 100644
+--- a/ssl/extensions.cc
++++ b/ssl/extensions.cc
+@@ -357,7 +357,15 @@ bool tls12_check_peer_sigalg(const SSL_HANDSHAKE *hs, uint8_t *out_alert,
+   // The peer must have selected an algorithm that is consistent with its public
+   // key, the TLS version, and what we advertised.
+   Span<const uint16_t> sigalgs = tls12_get_verify_sigalgs(hs);
+-  if (std::find(sigalgs.begin(), sigalgs.end(), sigalg) == sigalgs.end() ||
++  // REALITY replaces the target certificate with an authenticated temporary
++  // Ed25519 certificate. Chromium does not normally advertise Ed25519 for
++  // certificate verification, so allow this one signature scheme only for a
++  // configured REALITY handshake. Keep the advertised list unchanged so the
++  // mirrored ClientHello remains compatible with the real target.
++  const bool is_reality_ed25519 =
++      hs->ssl->reality_configured && sigalg == SSL_SIGN_ED25519;
++  if ((std::find(sigalgs.begin(), sigalgs.end(), sigalg) == sigalgs.end() &&
++       !is_reality_ed25519) ||
+       !ssl_pkey_supports_algorithm(hs->ssl, pkey, sigalg, /*is_verify=*/true)) {
+     OPENSSL_PUT_ERROR(SSL, SSL_R_WRONG_SIGNATURE_TYPE);
+     *out_alert = SSL_AD_ILLEGAL_PARAMETER;

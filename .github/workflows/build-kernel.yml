@@ -10,6 +10,15 @@ on:
   pull_request:
     paths: ["patches/**", "tests/**", "CHROMIUM_VERSION", ".github/workflows/build-kernel.yml"]
   workflow_dispatch:
+    inputs:
+      target:
+        description: Jobs to run
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - reality-e2e
   release:
     types: [published]
 
@@ -32,7 +41,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [x64, arm64]
+        arch: ${{ fromJSON(inputs.target == 'reality-e2e' && '["x64"]' || '["x64", "arm64"]') }}
     env:
       EXTRA_FLAGS: 'target_cpu="${{ matrix.arch }}"'
       BUNDLE: naivereal-${{ github.event.release.tag_name || 'kernel' }}-${{ github.job }}-${{ matrix.arch }}
@@ -46,12 +55,16 @@ jobs:
       - name: Apply REALITY patches (net + spider + build registration)
         run: |
           for p in 002-net-reality-plumbing 003-spider-mode 004-net-build-registration; do
-            git -C upstream/src apply "$GITHUB_WORKSPACE/patches/$p.patch"
+            git -C upstream apply --ignore-space-change --whitespace=nowarn --directory=src "$GITHUB_WORKSPACE/patches/$p.patch"
           done
       - name: Apply BoringSSL REALITY patch
         run: |
           test -d upstream/src/third_party/boringssl/src
-          git -C upstream/src/third_party/boringssl/src apply "$GITHUB_WORKSPACE/patches/001-boringssl-reality.patch"
+          git -C upstream apply --ignore-space-change --whitespace=nowarn --directory=src/third_party/boringssl/src "$GITHUB_WORKSPACE/patches/001-boringssl-reality.patch"
+          test -f upstream/src/net/socket/reality_config.cc
+          test -f upstream/src/third_party/boringssl/src/ssl/reality.cc
+          grep -q -- '--reality-public-key' upstream/src/net/tools/naive/naive_proxy_bin.cc
+          git -C upstream diff --check
       - name: Cache toolchains (Linux)
         uses: actions/cache@v4
         with:
@@ -100,6 +113,9 @@ jobs:
           ccache -z
           ./build.sh
           ccache -s && ccache --evict-older-than 1d
+      - name: Verify REALITY patch is in the binary
+        working-directory: upstream/src
+        run: out/Release/naive --help 2>&1 | grep -q -- '--reality-public-key'
       - name: Basic test
         working-directory: upstream/src
         run: ../tests/basic.sh out/Release/naive
@@ -123,6 +139,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   windows:
+    if: ${{ inputs.target != 'reality-e2e' }}
     runs-on: windows-2022
     env:
       EXTRA_FLAGS: 'target_cpu="x64"'
@@ -136,9 +153,12 @@ jobs:
       - name: Apply REALITY patches
         run: |
           for p in 002-net-reality-plumbing 003-spider-mode 004-net-build-registration; do
-            git -C upstream/src apply "$GITHUB_WORKSPACE/patches/$p.patch"
+            git -C upstream apply --ignore-space-change --whitespace=nowarn --directory=src "$GITHUB_WORKSPACE/patches/$p.patch"
           done
-          git -C upstream/src/third_party/boringssl/src apply "$GITHUB_WORKSPACE/patches/001-boringssl-reality.patch"
+          git -C upstream apply --ignore-space-change --whitespace=nowarn --directory=src/third_party/boringssl/src "$GITHUB_WORKSPACE/patches/001-boringssl-reality.patch"
+          test -f upstream/src/net/socket/reality_config.cc
+          test -f upstream/src/third_party/boringssl/src/ssl/reality.cc
+          grep -q -- '--reality-public-key' upstream/src/net/tools/naive/naive_proxy_bin.cc
       - name: Cache toolchains
         uses: actions/cache@v4
         with:
@@ -171,6 +191,9 @@ jobs:
           ~/.cargo/bin/sccache -z
           ./build.sh
           ~/.cargo/bin/sccache -s
+      - name: Verify REALITY patch is in the binary
+        working-directory: upstream/src
+        run: out/Release/naive.exe --help 2>&1 | grep -q -- '--reality-public-key'
       - name: Basic test
         working-directory: upstream/src
         run: ../tests/basic.sh out/Release/naive

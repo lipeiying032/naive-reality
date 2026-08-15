@@ -154,7 +154,7 @@ func (s *tunnelServer) handleConn(raw net.Conn) {
 	}
 	s.stats.IncAuthed()
 	raw.SetDeadline(time.Time{})
-	s.serveH2(conn)
+	s.serveConn(conn)
 }
 
 func main() {
