@@ -7,6 +7,12 @@
   v2rayN-windows-64-other-bins/bin/naiveproxy/naive.exe 按需下载, 存为
   `<v2rayN目录>\bin\naiveproxy\naive.exe`, 并以官方 naive config.json 格式驱动.
 
+## 获取补丁内核文件
+
+1. 打开仓库 Actions 页, 进入最近一次 Build Kernel 运行(main 分支);
+2. 下载 artifact `kernel-windows-x64` 并解压;
+3. 取其中的 `naive.exe`(与官方同名的补丁内核), 校验 sha256(运行的 Pack 步骤输出中有).
+
 ## 替换步骤
 
 1. 先用 v2rayN 正常添加一次 naive 节点(触发其下载 naiveproxy 核心), 或手动创建目录;
