@@ -193,7 +193,7 @@ new file mode 100644
 index 0000000..ec50250
 --- /dev/null
 +++ b/ssl/reality.cc
-@@ -0,0 +1,237 @@
+@@ -0,0 +1,238 @@
 +// Copyright 2025 The BoringSSL Authors
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
@@ -327,7 +327,7 @@ index 0000000..ec50250
 +  }
 +  // The legacy session id is at offset 39: 4-byte handshake header, 2-byte
 +  // legacy_version, 32-byte random, then the 1-byte session-id length prefix.
-+  if (msg.size() < 39 + 32) {
++  if (msg.size() < 39 + 32 || hs->session_id.size() != 32) {
 +    OPENSSL_PUT_ERROR(SSL, ERR_R_INTERNAL_ERROR);
 +    return false;
 +  }
@@ -343,6 +343,7 @@ index 0000000..ec50250
 +    return false;
 +  }
 +  OPENSSL_memcpy(msg.data() + 39, sealed, sizeof(sealed));
++  OPENSSL_memcpy(hs->session_id.data(), sealed, sizeof(sealed));
 +
 +  OPENSSL_memcpy(ssl->reality_auth_key, auth_key, sizeof(auth_key));
 +  ssl->reality_auth_key_set = true;
