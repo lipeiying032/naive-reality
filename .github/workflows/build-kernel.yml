@@ -23,6 +23,11 @@ on:
   release:
     types: [published]
 
+# The release event needs write access to publish release assets with the
+# default GITHUB_TOKEN.
+permissions:
+  contents: write
+
 # All run steps use bash: the patch-apply scripts are POSIX shell,
 # and upstream's own workflow does the same (Git Bash is present on
 # windows runners).
@@ -138,7 +143,7 @@ jobs:
           path: upstream/src/${{ env.BUNDLE }}.tar.xz
       - name: Upload naivereal assets
         if: ${{ github.event_name == 'release' }}
-        run: gh release upload "${GITHUB_REF##*/}" ${{ env.BUNDLE }}.tar.xz --clobber
+        run: gh release upload "${{ github.event.release.tag_name }}" ${{ env.BUNDLE }}.tar.xz --clobber --repo "${{ github.repository }}"
         working-directory: upstream/src
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -217,7 +222,7 @@ jobs:
           path: upstream/src/${{ env.BUNDLE }}.zip
       - name: Upload naivereal assets
         if: ${{ github.event_name == 'release' }}
-        run: gh release upload "${GITHUB_REF##*/}" ${{ env.BUNDLE }}.zip --clobber
+        run: gh release upload "${{ github.event.release.tag_name }}" ${{ env.BUNDLE }}.zip --clobber --repo "${{ github.repository }}"
         working-directory: upstream/src
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
