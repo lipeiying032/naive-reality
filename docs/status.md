@@ -18,13 +18,24 @@
 - M5 发布: 前端 Linux/Win 二进制 + TUI Win 二进制已产出并冒烟通过; 部署/构建/Windows/TUN 文档成稿;
   - CI: .github/workflows/go.yml(Go 测试) + build-kernel.yml(内核 Linux x64/arm64 + Windows x64, 复刻官方流水线).
 
-## 待办(依赖外部条件)
+## 已推送 GitHub(PR #1)
 
-1. 推送 GitHub 后运行 build-kernel.yml 编译验证四个补丁(本机无 MSVC/depot_tools).
-2. 编译通过后: REALITY 全链路 e2e(补丁内核 <-> 前端 <-> 官方服务端), Xray 服务端握手互操作验证.
-3. TUN 编译修正 + 管理员环境手工验收(建卡/路由/DNS).
-4. TUN 运行时手工验收(管理员权限: 建卡/路由/DNS/断开恢复).
-5. 压测/脱敏审计后正式发布.
+- 仓库: https://github.com/lipeiying032/naive-reality, 分支 feature/naivereal-source, PR #1 已创建.
+- 本仓库模型: 仅含 Go 代码+补丁+CI; 内核源码由 CI 按 CHROMIUM_VERSION 从 klzgrad/naiveproxy 克隆后应用 patches/001-004 构建(上游仓库已 vendor 全部依赖, 无需 gclient).
+- PR #1 已合并到 main; PR #2(ci: windows runner 用 bash shell 修复)已创建: https://github.com/lipeiying032/naive-reality/pull/2.
+- CI 结果: go.yml 双平台测试(ubuntu+windows, 含 TUN 编译)与官方三件套 e2e 全部 success; Build Kernel: Linux 任务补丁应用全部通过、编译进行中; windows 任务首次因默认 shell 为 PowerShell 在补丁应用步骤失败, 已修复(workflow 加 defaults.run.shell: bash)并提交 PR #2.
+
+## 已推送 GitHub(PR #3)
+
+- Build Kernel 三平台(linux x64/arm64 + windows)编译+basic.sh 全部通过; 唯一失败为打包步骤 cp 上游缺失的 config.json.
+- 修复(PR #3): 仓库根新增 config.json(含 reality 块样例)与 USAGE.txt; 打包步骤改从 $GITHUB_WORKSPACE 拷贝; windows 打包改用 naive.exe; 全部 7 个 actions/cache 步骤加 save-always(失败也保存 ccache/工具链, 重跑复用增量编译, 不再冷构建).
+- ccache/sccache 上限 200M -> 1G.
+
+## 待办
+
+1. 等待 Build Kernel 重跑(PR #3): 成功后 reality-e2e 自动执行 REALITY 全链路验证.
+2. TUN 管理员环境手工验收(建卡/路由/DNS).
+3. 压测/脱敏审计后正式发布.
 
 ## 需要用户提供
 

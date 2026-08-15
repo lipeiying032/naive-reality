@@ -22,9 +22,9 @@ defaults:
 
 env:
   CACHE_EPOCH: 1
-  CCACHE_MAXSIZE: 200M
+  CCACHE_MAXSIZE: 1G
   CCACHE_MAXFILES: 0
-  SCCACHE_CACHE_SIZE: 200M
+  SCCACHE_CACHE_SIZE: 1G
 
 jobs:
   linux:
@@ -59,11 +59,13 @@ jobs:
             upstream/src/third_party/llvm-build/Release+Asserts/
             upstream/src/gn/
           key: toolchains-posix-${{ hashFiles('CHROMIUM_VERSION') }}-v${{ env.CACHE_EPOCH }}
+          save-always: true
       - name: Cache PGO (Linux)
         uses: actions/cache@v4
         with:
           path: upstream/src/chrome/build/pgo_profiles/
           key: pgo-linux-${{ hashFiles('CHROMIUM_VERSION') }}-v${{ env.CACHE_EPOCH }}
+          save-always: true
       - name: Regenerate Debian keyring
         working-directory: upstream/src
         run: |
@@ -77,6 +79,7 @@ jobs:
             upstream/src/out/sysroot-build/trixie/trixie_*
             upstream/src/out/sysroot-build/sid/sid_*
           key: sysroot-linux-${{ matrix.arch }}-${{ hashFiles('CHROMIUM_VERSION') }}-v${{ env.CACHE_EPOCH }}
+          save-always: true
       - id: ccache-timestamp
         run: echo "CCACHE_TIMESTAMP=$(date +%s)" >>$GITHUB_OUTPUT
       - name: Cache ccache files
@@ -84,6 +87,7 @@ jobs:
         with:
           path: ~/.cache/ccache
           key: ccache-linux-${{ matrix.arch }}-${{ hashFiles('CHROMIUM_VERSION') }}-${{ steps.ccache-timestamp.outputs.CCACHE_TIMESTAMP }}
+          save-always: true
           restore-keys: ccache-linux-${{ matrix.arch }}-${{ hashFiles('CHROMIUM_VERSION') }}-
       - name: Install APT packages
         run: |
@@ -103,7 +107,7 @@ jobs:
         working-directory: upstream/src
         run: |
           mkdir ${{ env.BUNDLE }}
-          cp out/Release/naive ../config.json ../LICENSE ../USAGE.txt ${{ env.BUNDLE }}
+          cp out/Release/naive "$GITHUB_WORKSPACE/config.json" "$GITHUB_WORKSPACE/LICENSE" "$GITHUB_WORKSPACE/USAGE.txt" ${{ env.BUNDLE }}
           tar cJf ${{ env.BUNDLE }}.tar.xz ${{ env.BUNDLE }}
           openssl sha256 out/Release/naive >sha256sum.txt
           echo "SHA256SUM=$(cut -d' ' -f2 sha256sum.txt)" >>$GITHUB_ENV
@@ -144,11 +148,13 @@ jobs:
             ~/.cargo/bin/
             ~/bin/ninja.exe
           key: toolchains-win-${{ hashFiles('CHROMIUM_VERSION') }}-v${{ env.CACHE_EPOCH }}
+          save-always: true
       - name: Cache PGO (win64)
         uses: actions/cache@v4
         with:
           path: upstream/src/chrome/build/pgo_profiles/chrome-win64-*
           key: pgo-win64-${{ hashFiles('CHROMIUM_VERSION') }}-v${{ env.CACHE_EPOCH }}
+          save-always: true
       - id: ccache-timestamp
         run: echo "CCACHE_TIMESTAMP=$(date +%s)" >>$GITHUB_OUTPUT
       - name: Cache ccache files
@@ -156,6 +162,7 @@ jobs:
         with:
           path: ~/AppData/Local/Mozilla/sccache
           key: ccache-win-x64-${{ hashFiles('CHROMIUM_VERSION') }}-${{ steps.ccache-timestamp.outputs.CCACHE_TIMESTAMP }}
+          save-always: true
           restore-keys: ccache-win-x64-${{ hashFiles('CHROMIUM_VERSION') }}-
       - name: Build
         working-directory: upstream/src
@@ -171,9 +178,10 @@ jobs:
         working-directory: upstream/src
         run: |
           mkdir ${{ env.BUNDLE }}
-          cp out/Release/naive ../config.json ../LICENSE ../USAGE.txt ${{ env.BUNDLE }}
+          cp out/Release/naive.exe ${{ env.BUNDLE }}/naive.exe
+          cp "$GITHUB_WORKSPACE/config.json" "$GITHUB_WORKSPACE/LICENSE" "$GITHUB_WORKSPACE/USAGE.txt" ${{ env.BUNDLE }}
           7z a ${{ env.BUNDLE }}.zip ${{ env.BUNDLE }}
-          openssl sha256 out/Release/naive.exe >sha256sum.txt
+          openssl sha256 ${{ env.BUNDLE }}/naive.exe >sha256sum.txt
           echo "SHA256SUM=$(cut -d' ' -f2 sha256sum.txt)" >>$GITHUB_ENV
       - uses: actions/upload-artifact@v4
         with:

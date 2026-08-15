@@ -1,0 +1,11 @@
+{
+  "listen": "socks://127.0.0.1:1080",
+  "proxy": "https://user:pass@example.com",
+  "padding": true,
+  "no-post-quantum": false,
+  "reality": {
+    "server_name": "www.microsoft.com",
+    "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "short_id": "0123456789abcdef"
+  }
+}
