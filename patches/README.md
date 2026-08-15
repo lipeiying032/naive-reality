@@ -96,7 +96,8 @@ verified with `git apply --check` against the exact pinned revisions.
    SNI override (use `reality.server_name`) right after the existing SNI block
    (line ~691) and calls `SSL_set1_reality_config(...)` **at the end of Init()**
    (after the compliance-policy block at line ~908) so its protocol restrictions
-   (TLS 1.3 only, X25519-only key shares, h2 ALPN, no tickets) override the earlier
+   (TLS 1.3 only, X25519-only key shares, caller-configured ALPN, no tickets)
+   override the earlier
    group/version/ALPN setup.
 2. **Certificate verification callback.** Chromium already installs
    `SSL_CTX_set_custom_verify(ssl_ctx_.get(), SSL_VERIFY_PEER, VerifyCertCallback)`
@@ -143,7 +144,8 @@ verified with `git apply --check` against the exact pinned revisions.
   `SSLClientSocketImpl` is acceptable. The spider-mode fetch is the one exception
   and is handled by suspending the global config for its duration.
 - **No ECH, no QUIC, no DTLS, no session resumption.** REALITY forces TLS 1.3 +
-  X25519 + h2 + no tickets, so resumption/ECH/QUIC paths are not exercised. The
+  X25519 + no tickets (ALPN remains caller-configured), so resumption/ECH/QUIC
+  paths are not exercised. The
   patch assumes the non-ECH, non-DTLS `ssl_add_client_hello` path.
 - **SNI == server_name == proxy host.** The REALITY cert check's "real target" branch
   verifies the certificate against the normal SNI (`host_and_port_.host()`). In the
@@ -183,7 +185,9 @@ verified with `git apply --check` against the exact pinned revisions.
 2. **Happy path.** Configure a REALITY server (Go XTLS/REALITY). Run
    `naive --proxy=https://<server_name>:443 --reality-public-key=<b64url>
    --reality-short-id=<hex> --reality-server-name=<server_name>`. A normal
-   CONNECT should succeed with ALPN h2 and TLS 1.3. Confirm (keylog / capture) that
+   CONNECT should succeed with TLS 1.3. The REALITY frontend dispatches by client
+   preface: h2 CONNECT remains supported, and HTTP/1.1 CONNECT is accepted when
+   ALPN is not signalled. Confirm (keylog / capture) that
    the ClientHello legacy session id at offset 39 is the 32-byte AEAD blob.
 3. **Cert check.** Confirm the REALITY server's temporary Ed25519 cert is accepted
    without normal chain verification (no trust-anchor fetch, handshake completes).

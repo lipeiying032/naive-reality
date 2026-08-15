@@ -46,6 +46,54 @@ func TestBuildH1Connect(t *testing.T) {
 	}
 }
 
+func TestTLSModeH1ConnectRelay(t *testing.T) {
+	upstream, echo := startMockUpstream(t)
+	addr, clientTLS := startTLSServer(t, upstream)
+	clientTLS = clientTLS.Clone()
+	clientTLS.NextProtos = nil // no ALPN: the client will use an HTTP/1.1 CONNECT tunnel
+
+	conn, err := tls.Dial("tcp", addr, clientTLS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if got := conn.ConnectionState().NegotiatedProtocol; got != "" {
+		t.Fatalf("ALPN = %q, want empty", got)
+	}
+	if _, err := io.WriteString(conn, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\nPadding: abc\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("connect status = %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("padding-type-reply"); got != "1" {
+		t.Errorf("padding-type-reply = %q", got)
+	}
+	buf := make([]byte, len(echo))
+	if _, err := io.ReadFull(br, buf); err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	if string(buf) != string(echo) {
+		t.Errorf("echo = %q, want %q", buf, echo)
+	}
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got := make([]byte, 4)
+	if _, err := io.ReadFull(br, got); err != nil {
+		t.Fatalf("read echo2: %v", err)
+	}
+	if string(got) != "ping" {
+		t.Errorf("echo2 = %q", got)
+	}
+}
+
 func TestCopyResponseHeaders(t *testing.T) {
 	src := http.Header{}
 	src.Add("padding", "xyz")
@@ -220,13 +268,13 @@ func TestTLSModeH2ConnectRelay(t *testing.T) {
 
 // testH2Client is a minimal HTTP/2 client driving one CONNECT stream (id 1).
 type testH2Client struct {
-	t     *testing.T
-	conn  net.Conn
-	fr    *http2.Framer
-	wmu   sync.Mutex
-	pr    *io.PipeReader
-	pw    *io.PipeWriter
-	resp  chan testH2Resp
+	t    *testing.T
+	conn net.Conn
+	fr   *http2.Framer
+	wmu  sync.Mutex
+	pr   *io.PipeReader
+	pw   *io.PipeWriter
+	resp chan testH2Resp
 }
 
 type testH2Resp struct {
