@@ -193,7 +193,7 @@ new file mode 100644
 index 0000000..ec50250
 --- /dev/null
 +++ b/ssl/reality.cc
-@@ -0,0 +1,236 @@
+@@ -0,0 +1,237 @@
 +// Copyright 2025 The BoringSSL Authors
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
@@ -254,7 +254,7 @@ index 0000000..ec50250
 +        !key_share->SerializePrivateKey(cbb.get())) {
 +      return false;
 +    }
-+    const uint8_t *data;
++    uint8_t *data;
 +    size_t len;
 +    if (!CBB_finish(cbb.get(), &data, &len) || len != 32) {
 +      return false;
@@ -368,8 +368,8 @@ index 0000000..ec50250
 +  }
 +  SSL_set_options(ssl, SSL_OP_NO_TICKET);
 +
-+  OPENSSL_memcpy(ssl->reality_public_key, public_key, 32);
-+  OPENSSL_memcpy(ssl->reality_short_id, short_id, 8);
++  bssl::OPENSSL_memcpy(ssl->reality_public_key, public_key, 32);
++  bssl::OPENSSL_memcpy(ssl->reality_short_id, short_id, 8);
 +  ssl->reality_configured = true;
 +  ssl->reality_auth_key_set = false;
 +  return 1;
