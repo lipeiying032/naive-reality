@@ -60,7 +60,7 @@ jobs:
           test "$(cat CHROMIUM_VERSION)" = "$(cat upstream/CHROMIUM_VERSION)"
       - name: Apply REALITY patches (net + spider + build registration)
         run: |
-          for p in 002-net-reality-plumbing 003-spider-mode 004-net-build-registration; do
+          for p in 002-net-reality-plumbing 003-spider-mode 004-net-build-registration 010-quic-hysteria2-bbr-tuning; do
             git -C upstream apply --ignore-space-change --whitespace=nowarn --directory=src "$GITHUB_WORKSPACE/patches/$p.patch"
           done
       - name: Apply BoringSSL REALITY patch
@@ -162,7 +162,7 @@ jobs:
           test "$(cat CHROMIUM_VERSION)" = "$(cat upstream/CHROMIUM_VERSION)"
       - name: Apply REALITY patches
         run: |
-          for p in 002-net-reality-plumbing 003-spider-mode 004-net-build-registration; do
+          for p in 002-net-reality-plumbing 003-spider-mode 004-net-build-registration 010-quic-hysteria2-bbr-tuning; do
             git -C upstream apply --ignore-space-change --whitespace=nowarn --directory=src "$GITHUB_WORKSPACE/patches/$p.patch"
           done
           git -C upstream apply --ignore-space-change --whitespace=nowarn --directory=src/third_party/boringssl/src "$GITHUB_WORKSPACE/patches/001-boringssl-reality.patch"
