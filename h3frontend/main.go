@@ -13,6 +13,7 @@ import (
 
 	"github.com/apernet/quic-go"
 	"github.com/apernet/quic-go/http3"
+	"github.com/apernet/quic-go/qlogwriter"
 
 	"naivereal/h3frontend/internal/congestion"
 )
@@ -70,7 +71,16 @@ func serve(ctx context.Context, cfg *Config) error {
 	if err != nil {
 		return err
 	}
+	qlogFactory, err := newSampledQLogTracerFactory(os.Getenv("QLOGDIR"))
+	if err != nil {
+		return fmt.Errorf("qlog: %w", err)
+	}
+	var tracer func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace
+	if qlogFactory != nil {
+		tracer = qlogFactory.Tracer
+	}
 	quicConf := &quic.Config{
+		InitialPacketSize:              cfg.QUIC.InitialPacketSize,
 		InitialStreamReceiveWindow:     cfg.QUIC.InitialStreamReceiveWindow,
 		MaxStreamReceiveWindow:         cfg.QUIC.MaxStreamReceiveWindow,
 		InitialConnectionReceiveWindow: cfg.QUIC.InitialConnectionReceiveWindow,
@@ -78,7 +88,10 @@ func serve(ctx context.Context, cfg *Config) error {
 		MaxIdleTimeout:                 maxIdle,
 		MaxIncomingStreams:             cfg.QUIC.MaxIncomingStreams,
 		DisablePathMTUDiscovery:        cfg.QUIC.DisablePathMTUDiscovery,
+		DisablePathManager:             cfg.QUIC.DisablePathManager,
 		Allow0RTT:                      true,
+		// QLOGDIR enables sampled per-connection qlogs (loss/cwnd/RTT only).
+		Tracer: tracer,
 	}
 
 	addr, err := net.ResolveUDPAddr("udp", cfg.Listen)
@@ -90,6 +103,9 @@ func serve(ctx context.Context, cfg *Config) error {
 		return fmt.Errorf("listen udp: %w", err)
 	}
 	defer udpConn.Close()
+	// Match the Xray h3reality deployment: explicit 4MiB UDP socket buffers.
+	_ = udpConn.SetReadBuffer(4 << 20)
+	_ = udpConn.SetWriteBuffer(4 << 20)
 
 	transport := &quic.Transport{Conn: udpConn, DisableGSO: cfg.QUIC.DisableGSO}
 	defer transport.Close()
@@ -121,13 +137,22 @@ func serve(ctx context.Context, cfg *Config) error {
 			}
 			return fmt.Errorf("accept: %w", err)
 		}
-		if err := congestion.UseBBR(conn, cfg.Congestion.BBRProfile); err != nil {
-			_ = conn.CloseWithError(0, err.Error())
-			continue
+		if cfg.Congestion.Type == "bbr" {
+			if err := congestion.UseBBR(conn, cfg.Congestion.BBRProfile); err != nil {
+				log.Error("replace congestion controller", "remote", conn.RemoteAddr(), "err", err)
+				_ = conn.CloseWithError(0, err.Error())
+				continue
+			}
 		}
+		remote := conn.RemoteAddr()
+		acceptedAt := time.Now()
+		log.Debug("quic conn accepted", "remote", remote)
 		go func() {
-			if err := h3srv.ServeQUICConn(conn); err != nil {
-				log.Debug("serve quic conn", "err", err)
+			err := h3srv.ServeQUICConn(conn)
+			if err != nil {
+				log.Warn("quic conn closed with error", "remote", remote, "duration", time.Since(acceptedAt), "err", err)
+			} else {
+				log.Debug("quic conn closed", "remote", remote, "duration", time.Since(acceptedAt))
 			}
 		}()
 	}

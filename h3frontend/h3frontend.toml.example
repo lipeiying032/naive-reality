@@ -7,6 +7,7 @@ cert = "/etc/naivereal/fullchain.pem"
 key = "/etc/naivereal/privkey.pem"
 
 [quic]
+initPacketSize = 1200
 initStreamReceiveWindow = 8388608
 maxStreamReceiveWindow = 8388608
 initConnReceiveWindow = 20971520
@@ -15,6 +16,7 @@ maxIdleTimeout = "30s"
 maxIncomingStreams = 1024
 disablePathMTUDiscovery = false
 disableGSO = false
+disablePathManager = false
 
 [congestion]
 type = "bbr"
