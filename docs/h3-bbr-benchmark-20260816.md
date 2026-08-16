@@ -59,3 +59,37 @@ indicative, not a final acceptance test.
 - Capture qlog/NetLog and packet captures to compare CWND, pacing rate, RTT, loss.
 - Decide whether H3 default should remain `standard` or use `aggressive` to match
   a typical HY2 deployment.
+
+---
+
+## Profile comparison (audio.230406.xyz, 256MiB, 2026-08-16)
+
+Domain certificate was issued on the VPS for `audio.230406.xyz`; the CDN domain
+was not touched. Server side remained `h3frontend` + official naive server, and
+client side used the patched naive kernel. All services were removed after the
+run.
+
+### Download 256MiB by server BBR profile
+
+| profile | run1 MiB/s | run2 MiB/s | median MiB/s | notes |
+|---|---:|---:|---:|---|
+| standard | 16.55 | 20.04 | 18.29 | fastest |
+| aggressive | 16.71 | 15.84 | 16.28 | stable, slightly behind standard |
+| conservative | ~11.2 | 16.89 | ~14.0 | slow first run, unstable |
+
+### Upload 256MiB by client BBR profile
+
+| profile | runs MiB/s | median MiB/s |
+|---|---:|---:|
+| standard | 7.48, 7.11, 7.15, 7.40, 6.86 | 7.15 |
+| aggressive | 7.12, 6.13, 7.68, 7.02, 6.68 | 7.02 |
+| conservative | 7.65, 7.85, 7.31 | 7.65 |
+
+### Conclusion for this VPS/path
+
+- Download direction: `standard` is the fastest and most consistent profile.
+- Upload direction: `conservative` has a small edge, but the spread is close to
+  the noise level of the shared 1-vCPU VPS.
+- `aggressive` is not the fastest profile on this path.
+- Recommended default remains `standard`; use `conservative` only if upload is
+  the dominant workload and verify with a longer repeated benchmark.
