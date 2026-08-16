@@ -37,6 +37,9 @@ addr = "127.0.0.1:18080"
 		c.QUIC.MaxConnectionReceiveWindow != 20*1024*1024 {
 		t.Fatalf("unexpected default QUIC windows: %+v", c.QUIC)
 	}
+	if c.QUIC.InitialPacketSize != 1200 {
+		t.Fatalf("unexpected default initial packet size: %d", c.QUIC.InitialPacketSize)
+	}
 	if c.Congestion.Type != "bbr" || c.Congestion.BBRProfile != "standard" {
 		t.Fatalf("unexpected congestion config: %+v", c.Congestion)
 	}

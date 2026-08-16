@@ -29,6 +29,7 @@ type TLSConfig struct {
 }
 
 type QUICConfig struct {
+	InitialPacketSize              uint16 `toml:"initPacketSize"`
 	InitialStreamReceiveWindow     uint64 `toml:"initStreamReceiveWindow"`
 	MaxStreamReceiveWindow         uint64 `toml:"maxStreamReceiveWindow"`
 	InitialConnectionReceiveWindow uint64 `toml:"initConnReceiveWindow"`
@@ -37,6 +38,7 @@ type QUICConfig struct {
 	MaxIncomingStreams             int64  `toml:"maxIncomingStreams"`
 	DisablePathMTUDiscovery        bool   `toml:"disablePathMTUDiscovery"`
 	DisableGSO                     bool   `toml:"disableGSO"`
+	DisablePathManager             bool   `toml:"disablePathManager"`
 }
 
 type CongestionConfig struct {
@@ -94,6 +96,12 @@ func (c *Config) validateAndFill() error {
 		return fmt.Errorf("upstream.addr %q: %w", c.Upstream.Addr, err)
 	}
 
+	if c.QUIC.InitialPacketSize == 0 {
+		c.QUIC.InitialPacketSize = 1200
+	} else if c.QUIC.InitialPacketSize < 1200 {
+		return fmt.Errorf("quic.initPacketSize must be at least 1200")
+	}
+
 	setWindow := func(name string, v *uint64, def uint64) error {
 		if *v == 0 {
 			*v = def
@@ -129,8 +137,10 @@ func (c *Config) validateAndFill() error {
 	if c.Congestion.Type == "" {
 		c.Congestion.Type = "bbr"
 	}
-	if c.Congestion.Type != "bbr" {
-		return fmt.Errorf("congestion.type %q: only bbr is supported by the h3 frontend", c.Congestion.Type)
+	switch c.Congestion.Type {
+	case "bbr", "cubic":
+	default:
+		return fmt.Errorf("congestion.type %q: must be bbr or cubic", c.Congestion.Type)
 	}
 	if c.Congestion.BBRProfile == "" {
 		c.Congestion.BBRProfile = "standard"

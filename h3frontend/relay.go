@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/apernet/quic-go/http3"
@@ -17,24 +19,39 @@ import (
 type relayHandler struct {
 	upstream string
 	dialer   net.Dialer
+	nextID   atomic.Uint64
+}
+
+type copyResult struct {
+	dir     string
+	bytes   int64
+	err     error
+	elapsed time.Duration
 }
 
 func (h *relayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	rid := h.nextID.Add(1)
+	host := r.Host
+	start := time.Now()
 	if r.Method != http.MethodConnect {
+		log.Debug("h3 non-connect request", "id", rid, "method", r.Method, "host", host, "remote", r.RemoteAddr)
 		w.Header().Set("content-type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = io.WriteString(w, "<html><head><title>404 Not Found</title></head><body>404 Not Found</body></html>")
 		return
 	}
+	log.Debug("h3 connect begin", "id", rid, "host", host, "remote", r.RemoteAddr)
 
 	up, err := h.dialer.Dial("tcp", h.upstream)
 	if err != nil {
+		log.Warn("h3 upstream dial failed", "id", rid, "host", host, "err", err)
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}
 	defer up.Close()
 
 	if _, err := up.Write(buildH1Connect(r.Host, r.Header)); err != nil {
+		log.Warn("h3 upstream write failed", "id", rid, "host", host, "err", err)
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}
@@ -42,11 +59,13 @@ func (h *relayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ubr := bufio.NewReader(up)
 	resp, err := http.ReadResponse(ubr, r)
 	if err != nil {
+		log.Warn("h3 upstream response failed", "id", rid, "host", host, "err", err)
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}
 	copyResponseHeaders(w.Header(), resp.Header)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Warn("h3 upstream returned non-2xx", "id", rid, "host", host, "status", resp.StatusCode)
 		w.WriteHeader(resp.StatusCode)
 		return
 	}
@@ -54,31 +73,40 @@ func (h *relayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	streamer, ok := w.(http3.HTTPStreamer)
 	if !ok {
+		log.Error("h3 response writer is not an HTTPStreamer", "id", rid, "host", host)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 	stream := streamer.HTTPStream()
+	log.Debug("h3 connect upstream ok", "id", rid, "host", host, "upstream", up.RemoteAddr(), "stream_id", stream.StreamID(), "elapsed", time.Since(start))
 
-	done := make(chan struct{}, 2)
+	copyStarted := time.Now()
+	done := make(chan copyResult, 2)
 	go func() {
-		_, _ = io.Copy(up, stream) // client -> upstream
+		n, copyErr := io.Copy(up, stream) // client -> upstream
+		closeErr := error(nil)
 		if tc, ok := up.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
+			closeErr = tc.CloseWrite()
 		}
-		done <- struct{}{}
+		done <- copyResult{dir: "client->upstream", bytes: n, err: errors.Join(copyErr, closeErr), elapsed: time.Since(copyStarted)}
 	}()
 	go func() {
-		_, _ = io.Copy(stream, ubr) // upstream -> client
-		_ = stream.Close()
-		done <- struct{}{}
+		n, copyErr := io.Copy(stream, ubr) // upstream -> client
+		closeErr := stream.Close()
+		done <- copyResult{dir: "upstream->client", bytes: n, err: errors.Join(copyErr, closeErr), elapsed: time.Since(copyStarted)}
 	}()
-	<-done
+
+	first := <-done
+	log.Debug("h3 tunnel first direction closed", "id", rid, "host", host, "dir", first.dir, "bytes", first.bytes, "err", first.err, "elapsed", first.elapsed)
 	_ = up.Close()
 	_ = stream.Close()
 	select {
-	case <-done:
+	case second := <-done:
+		log.Debug("h3 tunnel second direction closed", "id", rid, "host", host, "dir", second.dir, "bytes", second.bytes, "err", second.err, "elapsed", second.elapsed)
 	case <-time.After(5 * time.Second):
+		log.Warn("h3 tunnel second direction still open after 5s", "id", rid, "host", host)
 	}
+	log.Debug("h3 tunnel closed", "id", rid, "host", host, "elapsed", time.Since(start))
 }
 
 func buildH1Connect(authority string, header http.Header) []byte {

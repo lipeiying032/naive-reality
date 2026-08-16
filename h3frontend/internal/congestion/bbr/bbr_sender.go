@@ -1013,10 +1013,13 @@ func (b *bbrSender) calculateRecoveryWindow(bytesAcked, bytesLost congestion.Byt
 		return
 	}
 
+	recoveryFloor := b.getTargetCongestionWindow(1) / 2
+
 	// Set up the initial recovery window.
 	if b.recoveryWindow == 0 {
 		b.recoveryWindow = b.bytesInFlight + bytesAcked
 		b.recoveryWindow = max(b.minCongestionWindow, b.recoveryWindow)
+		b.recoveryWindow = max(b.recoveryWindow, recoveryFloor)
 		return
 	}
 
@@ -1037,6 +1040,12 @@ func (b *bbrSender) calculateRecoveryWindow(bytesAcked, bytesLost congestion.Byt
 	// Always allow sending at least |bytes_acked| in response.
 	b.recoveryWindow = max(b.recoveryWindow, b.bytesInFlight+bytesAcked)
 	b.recoveryWindow = max(b.minCongestionWindow, b.recoveryWindow)
+
+	// h3frontend tuning: on this deployment the original BBR recovery window
+	// collapses to minCongestionWindow under persistent packet loss and never
+	// recovers (observed with qlog). Keep at least half of the current BDP
+	// target so one loss burst cannot permanently pin the tunnel at ~4KB cwnd.
+	b.recoveryWindow = max(b.recoveryWindow, recoveryFloor)
 }
 
 // Return whether we should exit STARTUP due to excessive loss.
