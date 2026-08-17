@@ -39,7 +39,7 @@ Windows: 见 docs/windows.md; v2rayN 内核替换见 docs/v2rayN.md.
 ## 构建
 
 - frontend: cd frontend && go build ./... (本网络环境建议 GOPROXY=https://goproxy.cn,direct)
-- tui: cd tui && go build ./... (TUN 依赖 gvisor/wireguard-go 较大, 首次构建需下载)
+- tui: 已拆分到独立仓库 [naivereal-tui](https://github.com/lipeiying032/naivereal-tui); `cd tui && go build ./...` (TUN 依赖 gvisor/wireguard-go 较大, 首次构建需下载)
 - 客户端内核(C++): 推送 GitHub 后由 .github/workflows/build-kernel.yml 自动构建
   (linux x64/arm64 + windows x64): CI 克隆 klzgrad/naiveproxy(按 CHROMIUM_VERSION 校验)
   并应用 patches/001-004; 本地构建同样 = 克隆上游 + 应用补丁 + 官方 get-clang.sh/build.sh.
