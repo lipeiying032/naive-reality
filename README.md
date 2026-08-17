@@ -7,9 +7,9 @@
 | 组件 | 目录 | 说明 |
 |---|---|---|
 | 服务端 REALITY 前端 | frontend/ | Go; 复用 Xray 的 xtls/reality 服务端 fork, 终结 REALITY TLS/h2, 以 HTTP/1.1 CONNECT 转发给官方 naive 服务端; 也支持普通 TLS 模式(等价 Caddy) |
-| H3 frontend | h3frontend/ | 独立 QUIC/HTTP3 CONNECT 前端; 不包含 REALITY; 由 release-components 工作流自动发布 |
+| H3 frontend | h3frontend/ | 独立 QUIC/HTTP3 CONNECT 前端; 支持标准 TLS 模式与 REALITY-over-QUIC 模式(mode="reality", C-gamma: dest 证书链 + 预检/中继); 由 release-components 工作流自动发布 |
 | 服务端 naive 内核 | (上游) | 官方 naiveproxy 服务端二进制(不做任何改动, CI 按 CHROMIUM_VERSION 从上游拉取) |
-| 客户端内核 | patches/ | 官方 naiveproxy 客户端 + REALITY 补丁(BoringSSL); CI 克隆上游源码后应用 patches/001-004 构建, 单一 exe, 保持官方 config.json 契约, 可替换 v2rayN 目录内的 naiveproxy 内核 |
+| 客户端内核 | patches/ | 官方 naiveproxy 客户端 + REALITY 补丁(BoringSSL); CI 克隆上游源码后应用 patches/001-004 + 010-012 构建, 单一 exe, 保持官方 config.json 契约, 可替换 v2rayN 目录内的 naiveproxy 内核 |
 | Windows TUI 客户端 | tui/ | Go/bubbletea; 档案管理, 统计, 系统代理, TUN 模式(wintun + gVisor), 分享链接导入导出 |
 
 ## 架构
