@@ -2,13 +2,9 @@ name: release-components
 
 on:
   push:
-    branches: [main]
-    paths:
-      - "h3frontend/**"
-      - "frontend/**"
-      - ".github/workflows/release-components.yml"
     tags:
       - "v*"
+      - "[0-9]*.[0-9]*.[0-9]*"
   workflow_dispatch:
 
 permissions:
@@ -44,23 +40,14 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            RELEASE="${{ github.ref_name }}"
-            LATEST_FLAG=""
-            TITLE="naivereal $RELEASE"
-            NOTES="Release $RELEASE"
-          else
-            RELEASE="continuous"
-            LATEST_FLAG="--latest=false --prerelease"
-            TITLE="naivereal continuous build"
-            NOTES="Automatic build from main commit ${{ github.sha }}"
-          fi
+          RELEASE="${{ github.ref_name }}"
+          TITLE="naivereal $RELEASE"
+          NOTES="naivereal $RELEASE unified release: kernel, REALITY frontend and H3 frontend."
 
           if gh release view "$RELEASE" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             echo "release $RELEASE already exists; skipping create"
           else
-            # shellcheck disable=SC2086
-            gh release create "$RELEASE" --repo "${{ github.repository }}" --target "${{ github.sha }}" $LATEST_FLAG --title "$TITLE" --notes "$NOTES"
+            gh release create "$RELEASE" --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "$TITLE" --notes "$NOTES"
           fi
 
           gh release upload "$RELEASE" --repo "${{ github.repository }}" dist/* --clobber

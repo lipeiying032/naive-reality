@@ -48,16 +48,18 @@ Windows: 见 docs/windows.md; v2rayN 内核替换见 docs/v2rayN.md.
 
 ## 自动发布
 
-- `h3frontend/` 和 `frontend/` 均由 `.github/workflows/release-components.yml` 自动构建并发布：
-  - push 到 `main` 且相关目录变更时，更新 `continuous` release；
-  - 推送 `v*` tag 时，创建正式 GitHub Release。
-- 产物包括：
-  - `naivereal-h3frontend-linux-amd64`
-  - `naivereal-h3frontend-linux-arm64`
-  - `naivereal-frontend-linux-amd64`
-  - `naivereal-frontend-linux-arm64`
-  - `naivereal-frontend-windows-amd64.exe`
-- 官方 naive 内核仍由 `.github/workflows/build-kernel.yml` 单独构建，不混入上述 Go 组件产物。
+- 采用“统一正式版”策略：
+  - 推送 `v*` 或 `x.y.z` tag 时，`.github/workflows/release-components.yml` 自动构建并上传：
+    - `naivereal-h3frontend-linux-amd64`
+    - `naivereal-h3frontend-linux-arm64`
+    - `naivereal-frontend-linux-amd64`
+    - `naivereal-frontend-linux-arm64`
+    - `naivereal-frontend-windows-amd64.exe`
+  - 同一 tag 触发的 Release 会再由 `.github/workflows/build-kernel.yml` 构建并上传：
+    - `naivereal-kernel-linux-amd64`
+    - `naivereal-kernel-linux-arm64`
+    - `naivereal-kernel-windows-amd64.exe`
+- 不维护 `continuous` / `nightly` 通道，所有正式版本都集中在同一个 tag Release 中。
 
 ## 状态
 
