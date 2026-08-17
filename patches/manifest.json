@@ -29,11 +29,34 @@
       "apply_with": "git apply (or: patch -p1) from the src root",
       "depends_on": ["002-net-reality-plumbing.patch"],
       "description": "Registers net/socket/reality_config.{cc,h} in src/net/BUILD.gn. IMPORTANT: naiveproxy's tree has NO net/socket/BUILD.gn - all net sources are listed flat in src/net/BUILD.gn."
+    },
+    {
+      "file": "010-quic-hysteria2-bbr-tuning.patch",
+      "target": "naivereal src tree",
+      "apply_with": "git apply (or: patch -p1) from the src root",
+      "depends_on": ["002-net-reality-plumbing.patch"],
+      "description": "QUIC/H3 client tuning aligned with Hysteria2 BBR: 8MB socket buffers, 8/20MB receive windows, BBR profile flags (aggressive/conservative)."
+    },
+    {
+      "file": "011-quic-reality-boringssl.patch",
+      "target": "boringssl tree",
+      "apply_with": "git apply after 001 from the boringssl root",
+      "depends_on": ["001-boringssl-reality.patch"],
+      "description": "BoringSSL: QUIC REALITY variant - SSL_set1_reality_config_quic, seal the auth payload into the ClientHello random field (session_id stays empty per RFC 9001), skip CertificateVerify verification for REALITY-over-QUIC."
+    },
+    {
+      "file": "012-quic-reality-net.patch",
+      "target": "naivereal src tree",
+      "apply_with": "git apply (or: patch -p1) from the src root",
+      "depends_on": ["002-net-reality-plumbing.patch", "011-quic-reality-boringssl.patch"],
+      "description": "net/quiche: thread the global RealityConfig into the QUIC TLS handshake (QuicSSLConfig.reality), apply SSL_set1_reality_config_quic, override SNI to reality server_name, bypass ProofVerifier for REALITY-over-QUIC."
     }
   ],
   "build_notes": [
     "001 edits build.json (authoritative source list) and the generated gen/sources.{gni,cmake,bzl,mk}. If the CI regenerates from build.json (go run ./util/pregenerate), the generated-file edits are redundant but harmless.",
     "Chromium consumes boringssl via third_party/boringssl/BUILD.gn, which imports gen/sources.gni and references ssl_sources / ssl_internal_headers. That BUILD.gn is NOT in the naiveproxy git tree; no edit is needed there because the new files are added to the lists it already imports.",
-    "002/003 add net/socket/reality_config.{h,cc}; 004 registers them in src/net/BUILD.gn (verified: upstream naiveproxy has no net/socket/BUILD.gn; socket sources are listed flat in net/BUILD.gn around line 1015)."
+    "002/003 add net/socket/reality_config.{h,cc}; 004 registers them in src/net/BUILD.gn (verified: upstream naiveproxy has no net/socket/BUILD.gn; socket sources are listed flat in net/BUILD.gn around line 1015).",
+    "010/012 apply to the naiveproxy src tree; 011 applies to third_party/boringssl/src after 001.",
+    "QUIC REALITY uses the random-field auth (stage-2 C-gamma) because QUIC requires a zero-length session_id; the server side is implemented in h3frontend (mode=reality)."
   ]
 }

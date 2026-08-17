@@ -1,0 +1,260 @@
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index 1937629..2cb5519 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -2778,6 +2778,16 @@ OPENSSL_EXPORT int SSL_set1_reality_config(SSL *ssl,
+                                            const uint8_t public_key[32],
+                                            const uint8_t short_id[8]);
+ 
++// SSL_set1_reality_config_quic is the QUIC variant of
++// SSL_set1_reality_config. It configures REALITY for an outbound QUIC
++// handshake: the auth payload is sealed into the ClientHello random field
++// (the session id stays empty, as QUIC requires) and the CertificateVerify
++// signature is not verified. Unlike the TCP variant it does not restrict the
++// key-share groups, so the ClientHello keeps Chromium's default groups and
++// hybrid X25519MLKEM768 key share.
++OPENSSL_EXPORT int SSL_set1_reality_config_quic(
++    SSL *ssl, const uint8_t public_key[32], const uint8_t short_id[8]);
++
+ // SSL_clear_reality_config disables REALITY mode on |ssl| and clears any
+ // derived key material.
+ OPENSSL_EXPORT void SSL_clear_reality_config(SSL *ssl);
+diff --git a/ssl/internal.h b/ssl/internal.h
+index 6d7f4aa..5689204 100644
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -4290,6 +4290,12 @@ struct ssl_st {
+   // derived during the ClientHello build and consulted during certificate
+   // verification.
+   bool reality_configured = false;
++  // reality_quic is true when REALITY is configured for a QUIC handshake.
++  // QUIC keeps the ClientHello session_id empty and seals the auth payload
++  // into the random field instead; it also skips CertificateVerify
++  // verification (the server presents Dest's real chain signed with a
++  // throwaway key).
++  bool reality_quic = false;
+   uint8_t reality_public_key[32] = {0};
+   uint8_t reality_short_id[8] = {0};
+   bool reality_auth_key_set = false;
+diff --git a/ssl/reality.cc b/ssl/reality.cc
+index 788f723..cabd459 100644
+--- a/ssl/reality.cc
++++ b/ssl/reality.cc
+@@ -41,11 +41,12 @@ namespace {
+ // NOT the TLS version.
+ static const uint8_t kRealityClientVersion[3] = {1, 0, 0};
+ 
+-// reality_derive_auth_key computes the REALITY AuthKey
++// reality_derive_auth_key_with_salt computes the REALITY AuthKey
+ //   HKDF-SHA256(X25519(client_ephemeral_private, server_static_public),
+-//               salt=client_random[0:20], info="REALITY")
++//               salt=salt[0:20], info="REALITY")
+ // from the X25519 key share and writes it to |out_key|.
+-bool reality_derive_auth_key(SSL_HANDSHAKE *hs, uint8_t out_key[32]) {
++bool reality_derive_auth_key_with_salt(SSL_HANDSHAKE *hs, const uint8_t *salt,
++                                       size_t salt_len, uint8_t out_key[32]) {
+   SSL *const ssl = hs->ssl;
+   uint8_t private_key[32];
+   bool found = false;
+@@ -79,8 +80,8 @@ bool reality_derive_auth_key(SSL_HANDSHAKE *hs, uint8_t out_key[32]) {
+   }
+ 
+   static const char kInfo[] = "REALITY";
+-  if (!HKDF(out_key, 32, EVP_sha256(), shared, sizeof(shared),
+-            ssl->s3->client_random, 20,
++  if (salt_len != 20 ||
++      !HKDF(out_key, 32, EVP_sha256(), shared, sizeof(shared), salt, 20,
+             reinterpret_cast<const uint8_t *>(kInfo), sizeof(kInfo) - 1)) {
+     OPENSSL_PUT_ERROR(SSL, ERR_R_INTERNAL_ERROR);
+     return false;
+@@ -88,6 +89,13 @@ bool reality_derive_auth_key(SSL_HANDSHAKE *hs, uint8_t out_key[32]) {
+   return true;
+ }
+ 
++// reality_derive_auth_key computes the TCP REALITY AuthKey with the
++// client_random prefix as the HKDF salt.
++bool reality_derive_auth_key(SSL_HANDSHAKE *hs, uint8_t out_key[32]) {
++  return reality_derive_auth_key_with_salt(hs, hs->ssl->s3->client_random, 20,
++                                           out_key);
++}
++
+ // reality_seal_session_id computes the 32-byte REALITY session id blob
+ // (AES-256-GCM ciphertext || tag) with nonce client_random[20:32] and AAD
+ // |hello| (the serialized ClientHello with a zeroed session id).
+@@ -122,6 +130,47 @@ bool reality_seal_session_id(SSL_HANDSHAKE *hs, const uint8_t auth_key[32],
+   return true;
+ }
+ 
++// reality_seal_random computes the 32-byte REALITY auth payload for QUIC,
++// which is carried in the ClientHello random field. |hello| must be the full
++// serialized ClientHello with the random field (bytes 6..38) already zeroed;
++// the salt and nonce are derived from SHA-256(hello), matching the Go
++// applyRealityClientHelloRandom / verifyClientHelloRandom.
++bool reality_seal_random(SSL_HANDSHAKE *hs, const uint8_t auth_key[32],
++                         uint8_t out[32], const uint8_t *hello,
++                         size_t hello_len) {
++  SSL *const ssl = hs->ssl;
++  uint8_t ad_hash[32];
++  if (!EVP_Digest(hello, hello_len, ad_hash, nullptr, EVP_sha256(), nullptr)) {
++    OPENSSL_PUT_ERROR(SSL, ERR_R_INTERNAL_ERROR);
++    return false;
++  }
++
++  // Plaintext: version(3) | 0x00 reserved | unix_time(4, big-endian) |
++  // short_id(8).
++  uint8_t plaintext[16];
++  OPENSSL_memcpy(plaintext, kRealityClientVersion, 3);
++  plaintext[3] = 0;
++  uint32_t now = static_cast<uint32_t>(time(nullptr));
++  plaintext[4] = static_cast<uint8_t>(now >> 24);
++  plaintext[5] = static_cast<uint8_t>(now >> 16);
++  plaintext[6] = static_cast<uint8_t>(now >> 8);
++  plaintext[7] = static_cast<uint8_t>(now);
++  OPENSSL_memcpy(plaintext + 8, ssl->reality_short_id, 8);
++
++  ScopedEVP_AEAD_CTX aead_ctx;
++  if (!EVP_AEAD_CTX_init(aead_ctx.get(), EVP_aead_aes_256_gcm(), auth_key, 32,
++                         EVP_AEAD_DEFAULT_TAG_LENGTH, nullptr)) {
++    return false;
++  }
++  size_t out_len = 0;
++  if (!EVP_AEAD_CTX_seal(aead_ctx.get(), out, &out_len, 32, ad_hash + 20, 12,
++                         plaintext, sizeof(plaintext), hello, hello_len) ||
++      out_len != 32) {
++    return false;
++  }
++  return true;
++}
++
+ }  // namespace
+ 
+ bool ssl_reality_patch_client_hello(SSL_HANDSHAKE *hs, Array<uint8_t> &msg) {
+@@ -129,6 +178,46 @@ bool ssl_reality_patch_client_hello(SSL_HANDSHAKE *hs, Array<uint8_t> &msg) {
+   if (!ssl->reality_configured) {
+     return true;
+   }
++
++  if (ssl->reality_quic) {
++    // QUIC C-gamma: the session id must stay empty (RFC 9001), so the REALITY
++    // auth payload is sealed into the random field (bytes 6..38 of the full
++    // ClientHello message). The salt and nonce come from SHA-256 of the
++    // ClientHello with the random field zeroed.
++    if (msg.size() < 38) {
++      OPENSSL_PUT_ERROR(SSL, ERR_R_INTERNAL_ERROR);
++      return false;
++    }
++    uint8_t saved_random[32];
++    OPENSSL_memcpy(saved_random, msg.data() + 6, sizeof(saved_random));
++    OPENSSL_memset(msg.data() + 6, 0, sizeof(saved_random));
++
++    uint8_t ad_hash[32];
++    if (!EVP_Digest(msg.data(), msg.size(), ad_hash, nullptr, EVP_sha256(),
++                    nullptr)) {
++      OPENSSL_memcpy(msg.data() + 6, saved_random, sizeof(saved_random));
++      OPENSSL_PUT_ERROR(SSL, ERR_R_INTERNAL_ERROR);
++      return false;
++    }
++
++    uint8_t auth_key[32];
++    if (!reality_derive_auth_key_with_salt(hs, ad_hash, 20, auth_key)) {
++      OPENSSL_memcpy(msg.data() + 6, saved_random, sizeof(saved_random));
++      return false;
++    }
++
++    uint8_t sealed[32];
++    if (!reality_seal_random(hs, auth_key, sealed, msg.data(), msg.size())) {
++      OPENSSL_memcpy(msg.data() + 6, saved_random, sizeof(saved_random));
++      return false;
++    }
++    OPENSSL_memcpy(msg.data() + 6, sealed, sizeof(sealed));
++    OPENSSL_memcpy(ssl->s3->client_random, sealed, sizeof(sealed));
++    OPENSSL_memcpy(ssl->reality_auth_key, auth_key, sizeof(auth_key));
++    ssl->reality_auth_key_set = true;
++    return true;
++  }
++
+   // The legacy session id is at offset 39: 4-byte handshake header, 2-byte
+   // legacy_version, 32-byte random, then the 1-byte session-id length prefix.
+   if (msg.size() < 39 + 32 || hs->session_id.size() != 32) {
+@@ -174,6 +263,32 @@ int SSL_set1_reality_config(SSL *ssl, const uint8_t public_key[32],
+   bssl::OPENSSL_memcpy(ssl->reality_public_key, public_key, 32);
+   bssl::OPENSSL_memcpy(ssl->reality_short_id, short_id, 8);
+   ssl->reality_configured = true;
++  ssl->reality_quic = false;
++  ssl->reality_auth_key_set = false;
++  return 1;
++}
++
++// SSL_set1_reality_config_quic is the QUIC variant of
++// SSL_set1_reality_config. Unlike the TCP variant it does not restrict the
++// key-share groups to X25519-only: the QUIC stack keeps Chromium's default
++// groups/hybrid key shares (the server's ClientHelloVerifier accepts both
++// X25519 and X25519MLKEM768), which preserves the Chrome QUIC fingerprint.
++int SSL_set1_reality_config_quic(SSL *ssl, const uint8_t public_key[32],
++                                 const uint8_t short_id[8]) {
++  if (ssl == nullptr || public_key == nullptr || short_id == nullptr ||
++      ssl->server) {
++    return 0;
++  }
++  if (!SSL_set_min_proto_version(ssl, TLS1_3_VERSION) ||
++      !SSL_set_max_proto_version(ssl, TLS1_3_VERSION)) {
++    return 0;
++  }
++  SSL_set_options(ssl, SSL_OP_NO_TICKET);
++
++  bssl::OPENSSL_memcpy(ssl->reality_public_key, public_key, 32);
++  bssl::OPENSSL_memcpy(ssl->reality_short_id, short_id, 8);
++  ssl->reality_configured = true;
++  ssl->reality_quic = true;
+   ssl->reality_auth_key_set = false;
+   return 1;
+ }
+@@ -183,6 +298,7 @@ void SSL_clear_reality_config(SSL *ssl) {
+     return;
+   }
+   ssl->reality_configured = false;
++  ssl->reality_quic = false;
+   ssl->reality_auth_key_set = false;
+   OPENSSL_cleanse(ssl->reality_public_key, sizeof(ssl->reality_public_key));
+   OPENSSL_cleanse(ssl->reality_short_id, sizeof(ssl->reality_short_id));
+diff --git a/ssl/tls13_client.cc b/ssl/tls13_client.cc
+index c92bb27..bae3a1b 100644
+--- a/ssl/tls13_client.cc
++++ b/ssl/tls13_client.cc
+@@ -843,18 +843,27 @@ static enum ssl_hs_wait_t do_read_server_certificate_verify(SSL_HANDSHAKE *hs) {
+   if (!ssl->method->get_message(ssl, &msg)) {
+     return ssl_hs_read_message;
+   }
+-  switch (ssl_verify_peer_cert(hs)) {
+-    case ssl_verify_ok:
+-      break;
+-    case ssl_verify_invalid:
+-      return ssl_hs_error;
+-    case ssl_verify_retry:
+-      hs->tls13_state = state_read_server_certificate_verify;
+-      return ssl_hs_certificate_verify;
++  // REALITY-over-QUIC (C-gamma): the server presents Dest's real certificate
++  // chain but signs CertificateVerify with a throwaway key (it cannot hold
++  // Dest's private key). The REALITY auth credential sealed in the ClientHello
++  // random field is the actual server authentication, so both the chain check
++  // and the CertificateVerify signature check are skipped.
++  const bool skip_reality_verify = ssl->reality_configured && ssl->reality_quic;
++  if (!skip_reality_verify) {
++    switch (ssl_verify_peer_cert(hs)) {
++      case ssl_verify_ok:
++        break;
++      case ssl_verify_invalid:
++        return ssl_hs_error;
++      case ssl_verify_retry:
++        hs->tls13_state = state_read_server_certificate_verify;
++        return ssl_hs_certificate_verify;
++    }
+   }
+ 
+   if (!ssl_check_message_type(ssl, msg, SSL3_MT_CERTIFICATE_VERIFY) ||
+-      !tls13_process_certificate_verify(hs, msg) ||
++      (!skip_reality_verify &&
++       !tls13_process_certificate_verify(hs, msg)) ||
+       !ssl_hash_message(hs, msg)) {
+     return ssl_hs_error;
+   }
