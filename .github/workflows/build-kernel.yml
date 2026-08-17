@@ -7,6 +7,7 @@ on:
   push:
     branches: [main, master]
     paths: ["patches/**", "tests/**", "CHROMIUM_VERSION", ".github/workflows/build-kernel.yml"]
+    tags: ["v*", "[0-9]*.[0-9]*.[0-9]*"]
   pull_request:
     paths: ["patches/**", "tests/**", "CHROMIUM_VERSION", ".github/workflows/build-kernel.yml"]
   workflow_dispatch:
@@ -142,8 +143,17 @@ jobs:
           name: kernel-${{ matrix.arch }}
           path: upstream/src/${{ env.BUNDLE }}.tar.xz
       - name: Upload naivereal assets
-        if: ${{ github.event_name == 'release' }}
-        run: gh release upload "${{ github.event.release.tag_name }}" ${{ env.BUNDLE }}.tar.xz --clobber --repo "${{ github.repository }}"
+        if: ${{ github.event_name == 'release' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) }}
+        run: |
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            TAG="${{ github.event.release.tag_name }}"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+          if ! gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "naivereal $TAG" --notes "naivereal $TAG unified release"
+          fi
+          gh release upload "$TAG" ${{ env.BUNDLE }}.tar.xz --clobber --repo "${{ github.repository }}"
         working-directory: upstream/src
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -221,8 +231,17 @@ jobs:
           name: kernel-windows-x64
           path: upstream/src/${{ env.BUNDLE }}.zip
       - name: Upload naivereal assets
-        if: ${{ github.event_name == 'release' }}
-        run: gh release upload "${{ github.event.release.tag_name }}" ${{ env.BUNDLE }}.zip --clobber --repo "${{ github.repository }}"
+        if: ${{ github.event_name == 'release' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) }}
+        run: |
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            TAG="${{ github.event.release.tag_name }}"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+          if ! gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "naivereal $TAG" --notes "naivereal $TAG unified release"
+          fi
+          gh release upload "$TAG" ${{ env.BUNDLE }}.zip --clobber --repo "${{ github.repository }}"
         working-directory: upstream/src
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
