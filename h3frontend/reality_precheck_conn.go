@@ -75,8 +75,14 @@ type precheckClientState struct {
 	// decision (all resolved addresses of the configured dest). It is only
 	// touched by the read loop, alongside state. nil means the flow is
 	// dropped (no dest configured).
-	relayDest    []*net.UDPAddr
-	cryptoBuf    []byte
+	relayDest []*net.UDPAddr
+	cryptoBuf []byte
+	// cryptoFilled tracks which byte offsets of cryptoBuf carry real CRYPTO
+	// data. Chromium fragments large ClientHellos across several packets and
+	// the fragments can arrive out of order (a later fragment extends the
+	// buffer before the middle arrives), so extractClientHello must not treat
+	// a buffer as complete while it still has gaps.
+	cryptoFilled []bool
 	pending      [][]byte // raw datagrams held until the decision is made
 	pendingBytes int
 }
@@ -333,27 +339,30 @@ func (c *realityPrecheckPacketConn) handlePacket(data []byte, addr net.Addr) {
 // client AUTH (flushing everything to the quic-go queue) or marks it RELAY
 // (flushing everything to the dest).
 func (c *realityPrecheckPacketConn) decidePending(st *precheckClientState, data []byte, addr net.Addr) {
-	work := make([]byte, len(data))
-	copy(work, data)
-	pkt, err := parseQUICInitial(work)
-	if err != nil {
-		if isNotQUICInitial(err) {
+	// Chromium fragments large ClientHellos (MLKEM hybrid key shares) across
+	// several coalesced Initial packets in one datagram, so collect CRYPTO
+	// frames from every Initial packet, not just the first.
+	frags, parsed := parseAllInitialCrypto(data)
+	if !parsed {
+		// Fall back to single-packet classification for drop vs relay.
+		if _, err := parseQUICInitial(cloneDatagram(data)); err != nil && isNotQUICInitial(err) {
 			// A first junk packet must not reserve state-table capacity. Keep a
 			// state only when a previous Initial contributed buffered data.
 			c.forgetEmptyPending(addr, st)
 			c.logNonInitialDrop(addr, err)
 			return
 		}
-		log.Info("reality precheck relay: unparseable initial", "remote", addr.String(), "err", err)
+		log.Info("reality precheck relay: unparseable initial", "remote", addr.String())
 		c.relayDecision(st, data, addr)
 		return
 	}
-	for _, frag := range parseCryptoFrames(pkt.Payload) {
-		st.cryptoBuf = mergeCryptoFrag(st.cryptoBuf, frag)
+	for _, frag := range frags {
+		st.cryptoBuf, st.cryptoFilled = mergeCryptoFragTracked(st.cryptoBuf, st.cryptoFilled, frag)
 	}
-	hello := extractClientHello(st.cryptoBuf)
+	hello := extractClientHelloComplete(st.cryptoBuf, st.cryptoFilled)
 	if hello == nil {
-		// ClientHello incomplete: hold the datagram and wait for more Initials.
+		// ClientHello incomplete (or has gaps from out-of-order fragments):
+		// hold the datagram and wait for more Initials.
 		if len(st.pending) >= precheckMaxPendingPkts || st.pendingBytes >= precheckMaxPendingBytes ||
 			time.Since(st.firstSeen) > c.relayTimeout() {
 			log.Info("reality precheck relay: ClientHello incomplete", "remote", addr.String())

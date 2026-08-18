@@ -117,47 +117,47 @@ type initialPkt struct {
 // plaintext payload plus the connection IDs and packet number. data is
 // mutated in place during header protection removal / decryption, so callers
 // must pass a disposable copy when the original datagram is still needed.
-func parseQUICInitial(data []byte) (*initialPkt, error) {
+func parseQUICInitialLen(data []byte) (*initialPkt, int, error) {
 	var p initialPkt
 
 	if len(data) < 6 {
-		return nil, fmt.Errorf("%w: packet too short", errNotQUICInitial)
+		return nil, 0, fmt.Errorf("%w: packet too short", errNotQUICInitial)
 	}
 
 	// Check long header and Initial type (0xC0 with 1-byte PN)
 	firstByte := data[0]
 	if firstByte&0x80 == 0 {
-		return nil, fmt.Errorf("%w: not a long header", errNotQUICInitial)
+		return nil, 0, fmt.Errorf("%w: not a long header", errNotQUICInitial)
 	}
 	if firstByte&0x40 == 0 {
-		return nil, fmt.Errorf("%w: fixed bit is not set", errNotQUICInitial)
+		return nil, 0, fmt.Errorf("%w: fixed bit is not set", errNotQUICInitial)
 	}
 	pktType := (firstByte >> 4) & 0x03
 	if pktType != 0 {
-		return nil, fmt.Errorf("%w: not an Initial packet (type=%d)", errNotQUICInitial, pktType)
+		return nil, 0, fmt.Errorf("%w: not an Initial packet (type=%d)", errNotQUICInitial, pktType)
 	}
 
 	// Version (4 bytes) — only handle QUIC v1
 	if len(data) < 5 {
-		return nil, fmt.Errorf("%w: packet too short for version", errNotQUICInitial)
+		return nil, 0, fmt.Errorf("%w: packet too short for version", errNotQUICInitial)
 	}
 	if v := binary.BigEndian.Uint32(data[1:5]); v != 1 {
-		return nil, fmt.Errorf("%w: not QUIC v1 (version=%d)", errNotQUICInitial, v)
+		return nil, 0, fmt.Errorf("%w: not QUIC v1 (version=%d)", errNotQUICInitial, v)
 	}
 
 	offset := 5
 
 	// DCID Length and DCID
 	if offset >= len(data) {
-		return nil, fmt.Errorf("%w: truncated at DCID length", errNotQUICInitial)
+		return nil, 0, fmt.Errorf("%w: truncated at DCID length", errNotQUICInitial)
 	}
 	dcidLen := int(data[offset])
 	offset++
 	if dcidLen > quicV1MaxConnectionIDLen {
-		return nil, fmt.Errorf("%w: DCID length %d exceeds QUIC v1 maximum", errNotQUICInitial, dcidLen)
+		return nil, 0, fmt.Errorf("%w: DCID length %d exceeds QUIC v1 maximum", errNotQUICInitial, dcidLen)
 	}
 	if dcidLen > len(data)-offset {
-		return nil, fmt.Errorf("%w: truncated at DCID", errNotQUICInitial)
+		return nil, 0, fmt.Errorf("%w: truncated at DCID", errNotQUICInitial)
 	}
 	p.DCID = make([]byte, dcidLen)
 	copy(p.DCID, data[offset:offset+dcidLen])
@@ -165,15 +165,15 @@ func parseQUICInitial(data []byte) (*initialPkt, error) {
 
 	// SCID Length and SCID
 	if offset >= len(data) {
-		return nil, fmt.Errorf("%w: truncated at SCID length", errNotQUICInitial)
+		return nil, 0, fmt.Errorf("%w: truncated at SCID length", errNotQUICInitial)
 	}
 	scidLen := int(data[offset])
 	offset++
 	if scidLen > quicV1MaxConnectionIDLen {
-		return nil, fmt.Errorf("%w: SCID length %d exceeds QUIC v1 maximum", errNotQUICInitial, scidLen)
+		return nil, 0, fmt.Errorf("%w: SCID length %d exceeds QUIC v1 maximum", errNotQUICInitial, scidLen)
 	}
 	if scidLen > len(data)-offset {
-		return nil, fmt.Errorf("%w: truncated at SCID", errNotQUICInitial)
+		return nil, 0, fmt.Errorf("%w: truncated at SCID", errNotQUICInitial)
 	}
 	p.SCID = make([]byte, scidLen)
 	copy(p.SCID, data[offset:offset+scidLen])
@@ -181,25 +181,25 @@ func parseQUICInitial(data []byte) (*initialPkt, error) {
 
 	// Token Length (varint) and Token
 	if offset >= len(data) {
-		return nil, fmt.Errorf("%w: truncated at token length", errNotQUICInitial)
+		return nil, 0, fmt.Errorf("%w: truncated at token length", errNotQUICInitial)
 	}
 	tokenLen, varintBytes := readVarint(data[offset:])
 	if varintBytes == 0 {
-		return nil, fmt.Errorf("%w: truncated at token length", errNotQUICInitial)
+		return nil, 0, fmt.Errorf("%w: truncated at token length", errNotQUICInitial)
 	}
 	offset += varintBytes
 	if tokenLen > uint64(len(data)-offset) {
-		return nil, fmt.Errorf("%w: truncated at token", errNotQUICInitial)
+		return nil, 0, fmt.Errorf("%w: truncated at token", errNotQUICInitial)
 	}
 	offset += int(tokenLen)
 
 	// Length (varint) of remaining packet
 	if offset >= len(data) {
-		return nil, fmt.Errorf("%w: truncated at length", errNotQUICInitial)
+		return nil, 0, fmt.Errorf("%w: truncated at length", errNotQUICInitial)
 	}
 	packetLen, varintBytes := readVarint(data[offset:])
 	if varintBytes == 0 {
-		return nil, fmt.Errorf("%w: truncated at length", errNotQUICInitial)
+		return nil, 0, fmt.Errorf("%w: truncated at length", errNotQUICInitial)
 	}
 	offset += varintBytes
 
@@ -209,10 +209,10 @@ func parseQUICInitial(data []byte) (*initialPkt, error) {
 	// so a protected packet needs at least four PN/sample-prefix bytes plus
 	// the 16-byte sample (RFC 9001 Section 5.4.2).
 	if packetLen < 4+16 {
-		return nil, fmt.Errorf("%w: invalid packet length %d", errNotQUICInitial, packetLen)
+		return nil, 0, fmt.Errorf("%w: invalid packet length %d", errNotQUICInitial, packetLen)
 	}
 	if packetLen > uint64(len(data)-pnStart) {
-		return nil, fmt.Errorf("%w: packet length %d exceeds remaining datagram", errNotQUICInitial, packetLen)
+		return nil, 0, fmt.Errorf("%w: packet length %d exceeds remaining datagram", errNotQUICInitial, packetLen)
 	}
 	// A UDP datagram can coalesce several QUIC packets. Header protection and
 	// AEAD processing must be limited to the first packet's declared Length.
@@ -225,7 +225,7 @@ func parseQUICInitial(data []byte) (*initialPkt, error) {
 	// of the Packet Number field.
 	sampleOffset := pnStart + 4
 	if sampleOffset > len(data) || 16 > len(data)-sampleOffset {
-		return nil, fmt.Errorf("packet too short for header protection sample")
+		return nil, 0, fmt.Errorf("packet too short for header protection sample")
 	}
 	sample := make([]byte, 16)
 	copy(sample, data[sampleOffset:])
@@ -242,10 +242,10 @@ func parseQUICInitial(data []byte) (*initialPkt, error) {
 
 	// Unprotect packet number bytes
 	if pnLen > len(data)-pnStart {
-		return nil, fmt.Errorf("packet number extends beyond data")
+		return nil, 0, fmt.Errorf("packet number extends beyond data")
 	}
 	if packetLen < uint64(pnLen+16) {
-		return nil, fmt.Errorf("%w: packet length %d is shorter than packet number and authentication tag", errNotQUICInitial, packetLen)
+		return nil, 0, fmt.Errorf("%w: packet length %d is shorter than packet number and authentication tag", errNotQUICInitial, packetLen)
 	}
 	for i := 0; i < pnLen; i++ {
 		data[pnStart+i] ^= mask[1+i]
@@ -261,7 +261,7 @@ func parseQUICInitial(data []byte) (*initialPkt, error) {
 
 	// Decrypt payload (offset now points past packet number)
 	if offset > len(data) || 16 >= len(data)-offset {
-		return nil, fmt.Errorf("payload too short")
+		return nil, 0, fmt.Errorf("payload too short")
 	}
 
 	ciphertext := data[offset:]
@@ -287,11 +287,56 @@ func parseQUICInitial(data []byte) (*initialPkt, error) {
 	combined := append(ciphertext, authTag...)
 	plaintext, err := aead.Open(nil, nonce, combined, headerForAEAD)
 	if err != nil {
-		return nil, fmt.Errorf("decryption failed: %w", err)
+		return nil, 0, fmt.Errorf("decryption failed: %w", err)
 	}
 
 	p.Payload = plaintext
-	return &p, nil
+	return &p, pnStart + int(packetLen), nil
+}
+
+// parseQUICInitial parses one QUIC Initial packet (long header, type 0x00,
+// QUIC v1), removes header protection, decrypts the payload and returns the
+// plaintext payload plus the connection IDs and packet number. data is
+// mutated in place during header protection removal / decryption, so callers
+// must pass a disposable copy when the original datagram is still needed.
+func parseQUICInitial(data []byte) (*initialPkt, error) {
+	p, _, err := parseQUICInitialLen(data)
+	return p, err
+}
+
+// parseAllInitialCrypto extracts CRYPTO frames from every coalesced QUIC
+// Initial packet in a datagram. Chromium fragments large ClientHellos (with
+// MLKEM hybrid key shares) across several coalesced Initial packets in one
+// datagram, so the precheck must process all of them, not just the first.
+// It returns the CRYPTO fragments and whether at least one Initial packet
+// was successfully decrypted.
+func parseAllInitialCrypto(data []byte) (frags []cryptoFrag, parsed bool) {
+	off := 0
+	for off < len(data) {
+		if len(data)-off < 5 {
+			return frags, parsed
+		}
+		first := data[off]
+		if first&0x80 == 0 || first&0x40 == 0 {
+			return frags, parsed
+		}
+		if (first>>4)&0x03 != 0 {
+			return frags, parsed
+		}
+		sub := make([]byte, len(data)-off)
+		copy(sub, data[off:])
+		pkt, consumed, err := parseQUICInitialLen(sub)
+		if err != nil {
+			return frags, parsed
+		}
+		parsed = true
+		frags = append(frags, parseCryptoFrames(pkt.Payload)...)
+		if consumed <= 0 {
+			return frags, parsed
+		}
+		off += consumed
+	}
+	return frags, parsed
 }
 
 // cryptoFrag is one CRYPTO frame's (offset, data) within a decrypted payload.
@@ -387,6 +432,57 @@ func mergeCryptoFrag(buf []byte, frag cryptoFrag) []byte {
 	}
 	copy(buf[frag.off:end], frag.data)
 	return buf
+}
+
+// mergeCryptoFragTracked is mergeCryptoFrag that also records which byte
+// offsets carry real data in |filled| (used to detect out-of-order fragments
+// that leave gaps in the ClientHello reassembly).
+func mergeCryptoFragTracked(buf []byte, filled []bool, frag cryptoFrag) ([]byte, []bool) {
+	end := frag.off + len(frag.data)
+	if end > len(buf) {
+		grown := make([]byte, end)
+		copy(grown, buf)
+		buf = grown
+		if len(filled) < end {
+			grownF := make([]bool, end)
+			copy(grownF, filled)
+			filled = grownF
+		}
+	}
+	copy(buf[frag.off:end], frag.data)
+	for i := frag.off; i < end; i++ {
+		filled[i] = true
+	}
+	return buf, filled
+}
+
+// cryptoFilledComplete reports whether bytes [0:n) of the CRYPTO stream are
+// all filled (no gaps from out-of-order fragments).
+func cryptoFilledComplete(filled []bool, n int) bool {
+	if n < 0 || n > len(filled) {
+		return false
+	}
+	for _, f := range filled[:n] {
+		if !f {
+			return false
+		}
+	}
+	return true
+}
+
+// extractClientHelloComplete returns the ClientHello only when it is fully
+// present AND its bytes are all filled (no gaps). This matters for Chromium
+// clients, which fragment large ClientHellos across several packets whose
+// fragments can arrive out of order.
+func extractClientHelloComplete(cryptoData []byte, filled []bool) []byte {
+	hello := extractClientHello(cryptoData)
+	if hello == nil {
+		return nil
+	}
+	if !cryptoFilledComplete(filled, len(hello)) {
+		return nil
+	}
+	return hello
 }
 
 // extractClientHello returns the complete TLS ClientHello handshake message
