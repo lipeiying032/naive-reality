@@ -232,7 +232,9 @@ func (r *realityRelay) reap() {
 		if now.Sub(entry.lastSeen) > r.timeout {
 			delete(r.entries, key)
 			r.perIP[addrIPKey(entry.clientAddr)]--
-			entry.destConn.Close()
+			if entry.destConn != nil {
+				entry.destConn.Close()
+			}
 		}
 	}
 }
@@ -244,7 +246,9 @@ func (r *realityRelay) Close() error {
 		r.mu.Lock()
 		for key, entry := range r.entries {
 			delete(r.entries, key)
-			entry.destConn.Close()
+			if entry.destConn != nil {
+				entry.destConn.Close()
+			}
 		}
 		r.perIP = make(map[string]int)
 		r.mu.Unlock()

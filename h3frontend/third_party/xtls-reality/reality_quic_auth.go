@@ -261,11 +261,21 @@ func verifyClientHelloAuth(hello *clientHelloMsg, cfg *Config) (*clientHelloAuth
 // ClientHello's key shares: the raw X25519 share, or the trailing X25519
 // component of the X25519MLKEM768 hybrid share. It returns nil when no
 // usable share is present.
+//
+// A plain X25519 share is preferred over a hybrid share whenever one is
+// present: Chromium's QUIC ClientHello usually lists the X25519MLKEM768
+// hybrid share before the plain X25519 share, and the client seals the
+// REALITY payload with the plain X25519 ephemeral key. Returning the first
+// share in list order would pick the hybrid's X25519 component, which is a
+// different key, so the ECDH shared secret would mismatch and
+// authentication would fail.
 func extractClientKeyShare(hello *clientHelloMsg) []byte {
 	for _, keyShare := range hello.keyShares {
 		if keyShare.group == X25519 && len(keyShare.data) == 32 {
 			return keyShare.data
 		}
+	}
+	for _, keyShare := range hello.keyShares {
 		if keyShare.group == X25519MLKEM768 && len(keyShare.data) >= 32 {
 			return keyShare.data[len(keyShare.data)-32:]
 		}

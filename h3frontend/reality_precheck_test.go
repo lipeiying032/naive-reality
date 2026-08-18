@@ -175,6 +175,81 @@ func testInitialPacket(t *testing.T, payload []byte) []byte {
 	return pkt
 }
 
+// testInitialPacketOff is testInitialPacket with an explicit CRYPTO stream
+// offset, for building fragmented/coalesced ClientHello Initials.
+func testInitialPacketOff(t *testing.T, payload []byte, cryptoOff int) []byte {
+	t.Helper()
+	dcid := []byte{0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88}
+	scid := []byte{0x99, 0xaa, 0xbb, 0xcc}
+	key, iv, hp := deriveInitialSecrets(dcid)
+
+	frames := make([]byte, 0, len(payload)+16)
+	frames = append(frames, 0x06) // CRYPTO
+	frames = appendVarint(frames, uint64(cryptoOff))
+	frames = appendVarint(frames, uint64(len(payload)))
+	frames = append(frames, payload...)
+
+	pkt := make([]byte, 0, 128)
+	pkt = append(pkt, 0xc0) // long header, Initial, 1-byte PN
+	pkt = binary.BigEndian.AppendUint32(pkt, 1)
+	pkt = append(pkt, byte(len(dcid)))
+	pkt = append(pkt, dcid...)
+	pkt = append(pkt, byte(len(scid)))
+	pkt = append(pkt, scid...)
+	pkt = append(pkt, 0x00) // token len 0
+	pkt = appendVarint(pkt, uint64(1+len(frames)+16))
+	pnStart := len(pkt)
+	pkt = append(pkt, 0x00) // PN = 0
+
+	block, _ := aes.NewCipher(key)
+	aead, _ := cipher.NewGCM(block)
+	nonce := make([]byte, 12)
+	copy(nonce, iv)
+	cipherText := aead.Seal(nil, nonce, frames, pkt)
+	pkt = append(pkt, cipherText...)
+
+	// header protection (sample starts 4 bytes after the PN field start)
+	sample := pkt[pnStart+4 : pnStart+4+16]
+	blockHP, _ := aes.NewCipher(hp)
+	mask := make([]byte, 16)
+	blockHP.Encrypt(mask, sample)
+	pkt[0] ^= mask[0] & 0x0f
+	pkt[pnStart] ^= mask[1]
+	return pkt
+}
+
+func TestParseAllInitialCryptoCoalesced(t *testing.T) {
+	// A ClientHello large enough to be fragmented across two coalesced
+	// Initial packets (Chromium behaviour with MLKEM hybrid key shares).
+	hello := buildTestClientHelloBodySNI(make([]byte, 32), nil, bytes.Repeat([]byte{0x2a}, 32), "www.apple.com")
+	split := 40
+	part1, part2 := hello[:split], hello[split:]
+
+	datagram := append(testInitialPacketOff(t, part1, 0), testInitialPacketOff(t, part2, split)...)
+	frags, parsed := parseAllInitialCrypto(datagram)
+	if !parsed {
+		t.Fatal("parseAllInitialCrypto did not parse any Initial")
+	}
+	if len(frags) != 2 {
+		t.Fatalf("got %d fragments, want 2", len(frags))
+	}
+	var buf []byte
+	for _, frag := range frags {
+		buf = mergeCryptoFrag(buf, frag)
+	}
+	ch := extractClientHello(buf)
+	if ch == nil || !bytes.Equal(ch, hello) {
+		t.Fatalf("reassembled ClientHello mismatch: got %d bytes, want %d", len(ch), len(hello))
+	}
+
+	// A single-packet datagram must still work (one fragment).
+	single := testInitialPacket(t, hello)
+	frags2, parsed2 := parseAllInitialCrypto(single)
+	if !parsed2 || len(frags2) != 1 {
+		t.Fatalf("single-packet parse: parsed=%v frags=%d", parsed2, len(frags2))
+	}
+}
+
 func TestParseQUICInitialRoundTrip(t *testing.T) {
 	hello := []byte{0x01, 0x00, 0x00, 0x03, 0xaa, 0xbb, 0xcc}
 	pkt := testInitialPacket(t, hello)
