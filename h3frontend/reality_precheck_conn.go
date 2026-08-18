@@ -364,8 +364,13 @@ func (c *realityPrecheckPacketConn) decidePending(st *precheckClientState, data 
 		st.pendingBytes += len(data)
 		return
 	}
-	if c.verifier == nil || c.verifier.Verify(hello) != nil {
-		log.Info("reality precheck relay", "remote", addr.String())
+	if c.verifier == nil {
+		log.Info("reality precheck relay (no verifier configured)", "remote", addr.String())
+		c.relayDecision(st, data, addr)
+		return
+	}
+	if err := c.verifier.Verify(hello); err != nil {
+		log.Info("reality precheck relay: auth failed", "remote", addr.String(), "err", err)
 		c.relayDecision(st, data, addr)
 		return
 	}
