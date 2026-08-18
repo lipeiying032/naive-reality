@@ -23,7 +23,13 @@ var log = slog.New(slog.NewTextHandler(os.Stderr, nil))
 func main() {
 	path := "h3frontend.toml"
 	if len(os.Args) >= 2 {
-		path = os.Args[1]
+		switch os.Args[1] {
+		case "genkey":
+			runGenkey()
+			return
+		default:
+			path = os.Args[1]
+		}
 	}
 	cfg, err := loadConfig(path)
 	if err != nil {
@@ -58,14 +64,29 @@ func setLogLevel(level string) {
 }
 
 func serve(ctx context.Context, cfg *Config) error {
-	cert, err := tls.LoadX509KeyPair(cfg.TLS.Cert, cfg.TLS.Key)
-	if err != nil {
-		return fmt.Errorf("load cert: %w", err)
+	var params *realityQUICParams
+	var tlsConf *tls.Config
+	switch cfg.Mode {
+	case "reality":
+		var err error
+		params, err = buildRealityParams(cfg)
+		if err != nil {
+			return err
+		}
+		tlsConf, err = buildRealityTLSConfig(ctx, params)
+		if err != nil {
+			return err
+		}
+	default: // "tls"
+		cert, err := tls.LoadX509KeyPair(cfg.TLS.Cert, cfg.TLS.Key)
+		if err != nil {
+			return fmt.Errorf("load cert: %w", err)
+		}
+		tlsConf = http3.ConfigureTLSConfig(&tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS13,
+		})
 	}
-	tlsConf := http3.ConfigureTLSConfig(&tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS13,
-	})
 
 	maxIdle, err := time.ParseDuration(cfg.QUIC.MaxIdleTimeout)
 	if err != nil {
@@ -102,12 +123,21 @@ func serve(ctx context.Context, cfg *Config) error {
 	if err != nil {
 		return fmt.Errorf("listen udp: %w", err)
 	}
-	defer udpConn.Close()
 	// Match the Xray h3reality deployment: explicit 4MiB UDP socket buffers.
 	_ = udpConn.SetReadBuffer(4 << 20)
 	_ = udpConn.SetWriteBuffer(4 << 20)
 
-	transport := &quic.Transport{Conn: udpConn, DisableGSO: cfg.QUIC.DisableGSO}
+	var conn net.PacketConn = udpConn
+	if cfg.Mode == "reality" {
+		conn, err = newRealityPrecheckPacketConn(ctx, udpConn, params)
+		if err != nil {
+			_ = udpConn.Close()
+			return fmt.Errorf("reality precheck: %w", err)
+		}
+	}
+	defer conn.Close()
+
+	transport := &quic.Transport{Conn: conn, DisableGSO: cfg.QUIC.DisableGSO}
 	defer transport.Close()
 	listener, err := transport.Listen(tlsConf, quicConf)
 	if err != nil {
@@ -125,10 +155,10 @@ func serve(ctx context.Context, cfg *Config) error {
 	go func() {
 		<-ctx.Done()
 		_ = listener.Close()
-		_ = udpConn.Close()
+		_ = conn.Close()
 	}()
 
-	log.Info("listening", "addr", udpConn.LocalAddr(), "congestion", cfg.Congestion.Type, "bbr_profile", cfg.Congestion.BBRProfile)
+	log.Info("listening", "addr", udpConn.LocalAddr(), "mode", cfg.Mode, "congestion", cfg.Congestion.Type, "bbr_profile", cfg.Congestion.BBRProfile)
 	for {
 		conn, err := listener.Accept(ctx)
 		if err != nil {

@@ -2,12 +2,15 @@
 
 This patchset adds an optional REALITY client mode to the official naive client so
 that its https-proxy connection uses the REALITY protocol (XTLS/REALITY) instead of
-a plain TLS handshake. Only the client side is implemented; the server is the
-existing Go REALITY server (XTLS/REALITY fork).
+a plain TLS handshake. The server side is the existing Go REALITY server
+(`frontend/`) for TCP and `h3frontend` (mode=reality) for REALITY-over-QUIC.
 
-The wire format follows Xray's REALITY (`transport/internet/reality/reality.go`,
-`UClient`). No GPL/MPL code was copied — everything here is implemented from the
-protocol description in the task spec.
+For TCP the wire format follows Xray's REALITY (`transport/internet/reality/reality.go`,
+`UClient`). For QUIC the C-gamma stage-2 variant is used: the auth payload is sealed
+into the ClientHello **random field** (session_id stays empty per RFC 9001), and the
+client skips CertificateVerify verification (the server presents Dest's real chain
+signed with a throwaway key). No GPL/MPL code was copied — everything here is
+implemented from the protocol description in the reference implementation.
 
 **Wire-format reference (interop-verified).** The repo's Go test client
 `frontend/internal/realitytest/realitytest.go` (`Dial`) implements the exact
@@ -32,11 +35,15 @@ the ordinary h2 CONNECT, exactly like upstream naive.
 | `001-boringssl-reality.patch` | `E:\deepseekwork\boringssl` | BoringSSL reality.cc/.h + public API + ClientHello patch + build registration |
 | `002-net-reality-plumbing.patch` | `E:\deepseekwork\naivereal\src` | config parsing, global RealityConfig, SSLClientSocketImpl wiring, new net error |
 | `003-spider-mode.patch` | `E:\deepseekwork\naivereal\src` | spider mode (one GET to the real target, then fail) |
+| `004-net-build-registration.patch` | `E:\deepseekwork\naivereal\src` | registers net/socket/reality_config.{cc,h} in src/net/BUILD.gn |
+| `010-quic-hysteria2-bbr-tuning.patch` | `E:\deepseekwork\naivereal\src` | Hysteria2-aligned QUIC windows/socket buffers/BBR profiles |
+| `011-quic-reality-boringssl.patch` | boringssl tree | QUIC REALITY: random-field auth, `SSL_set1_reality_config_quic`, skip CertificateVerify |
+| `012-quic-reality-net.patch` | `E:\deepseekwork\naivereal\src` | thread global RealityConfig into QUIC TLS handshake (QuicSSLConfig.reality, SNI override, ProofVerifier bypass) |
 | `manifest.json` | — | patch order / dependencies / apply notes |
 
-Apply 001 to the boringssl tree, then 002 and 003 (in order) to the naiveproxy
-`src` tree. All patches are plain unified diffs with `a/`/`b/` prefixes and
-verified with `git apply --check` against the exact pinned revisions.
+Apply 001 then 011 to the boringssl tree, and 002, 003, 004, 010, 012 (in order) to
+the naiveproxy `src` tree. All patches are plain unified diffs with `a/`/`b/` prefixes
+and verified with `git apply --check` against the exact pinned revisions.
 
 ---
 
@@ -137,16 +144,49 @@ verified with `git apply --check` against the exact pinned revisions.
 
 ---
 
+### QUIC REALITY (patches 011 + 012)
+
+REALITY-over-QUIC uses the C-gamma stage-2 design (see h3-reality-deploy):
+the ClientHello keeps a zero-length session_id, and the 32-byte REALITY auth
+payload is sealed into the **random field** (bytes 6..38 of the handshake
+message). The server's h3frontend precheck decrypts the QUIC Initial, extracts
+the ClientHello, and verifies the random-field credential before letting the
+flow into quic-go.
+
+1. **BoringSSL random-field sealing (011).** `ssl_reality_patch_client_hello`
+   branches on `ssl->reality_quic`: it zeroes `msg[6:38]`, computes
+   `adHash = SHA256(msg)`, derives
+   `AuthKey = HKDF-SHA256(shared, salt=adHash[0:20], info="REALITY")`, and seals
+   the 16-byte plaintext with AES-256-GCM using nonce `adHash[20:32]`. The
+   ciphertext overwrites `msg[6:38]` and `ssl->s3->client_random`, so the
+   transcript hashes the patched hello.
+2. **No group pinning (011).** `SSL_set1_reality_config_quic` does not call
+   `SSL_set1_group_ids` / `SSL_set1_client_key_shares`, so Chromium's default
+   QUIC groups and hybrid X25519MLKEM768 key share are preserved (the server's
+   `extractClientKeyShare` handles both X25519 and the hybrid trailing bytes).
+3. **Skip CertificateVerify (011).** `do_read_server_certificate_verify`
+   skips both `ssl_verify_peer_cert` and `tls13_process_certificate_verify`
+   when `reality_configured && reality_quic`.
+4. **net wiring (012).** A quiche-side `RealityQuicConfig` is added to
+   `QuicSSLConfig`; `QuicChromiumClientSession::GetSSLConfig()` populates it
+   from the global `net::GetRealityConfig()`; `TlsConnection` applies
+   `SSL_set1_reality_config_quic` to the per-connection SSL and bypasses
+   `VerifyCallback`; `TlsClientHandshaker::CryptoConnect()` overrides the SNI
+   with `reality.server_name`.
+
+---
+
 ## Assumptions and caveats
 
 - **All SSL connections are proxy TLS.** naive.exe makes only proxy TLS connections
   in normal operation, so applying `SSL_set1_reality_config` to every
   `SSLClientSocketImpl` is acceptable. The spider-mode fetch is the one exception
   and is handled by suspending the global config for its duration.
-- **No ECH, no QUIC, no DTLS, no session resumption.** REALITY forces TLS 1.3 +
-  X25519 + no tickets (ALPN remains caller-configured), so resumption/ECH/QUIC
-  paths are not exercised. The
-  patch assumes the non-ECH, non-DTLS `ssl_add_client_hello` path.
+- **No ECH, no DTLS, no session resumption (TCP REALITY).** TCP REALITY forces TLS 1.3 +
+  X25519 + no tickets (ALPN remains caller-configured), so resumption/ECH/DTLS
+  paths are not exercised. The QUIC path (011/012) keeps Chromium's default groups,
+  disables tickets, and skips CertificateVerify — h3frontend mode=reality is the
+  matching server.
 - **SNI == server_name == proxy host.** The REALITY cert check's "real target" branch
   verifies the certificate against the normal SNI (`host_and_port_.host()`). In the
   intended setup the proxy host equals the REALITY `server_name`, so they coincide.
@@ -200,3 +240,8 @@ verified with `git apply --check` against the exact pinned revisions.
    and bad `short_id` (>16 hex, non-hex) and confirm clean config errors.
 6. **Negative.** Without `--reality-*` flags, behavior must be byte-identical to
    upstream (no session-id patch, normal verification).
+7. **QUIC REALITY happy path.** Run `tests/quic-reality-e2e.sh` (CI job
+   `quic-reality-e2e`): patched `naive --proxy=quic://...` + `--reality-*` flags →
+   h3frontend (mode=reality, h3_cert/h3_key) → official naive server. Confirm the
+   ClientHello random field is the 32-byte AEAD blob and the handshake completes
+   without CertificateVerify verification.

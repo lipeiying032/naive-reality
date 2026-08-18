@@ -61,16 +61,19 @@ jobs:
           test "$(cat CHROMIUM_VERSION)" = "$(cat upstream/CHROMIUM_VERSION)"
       - name: Apply REALITY patches (net + spider + build registration)
         run: |
-          for p in 002-net-reality-plumbing 003-spider-mode 004-net-build-registration 010-quic-hysteria2-bbr-tuning; do
+          for p in 002-net-reality-plumbing 003-spider-mode 004-net-build-registration 010-quic-hysteria2-bbr-tuning 012-quic-reality-net; do
             git -C upstream apply --ignore-space-change --whitespace=nowarn --directory=src "$GITHUB_WORKSPACE/patches/$p.patch"
           done
       - name: Apply BoringSSL REALITY patch
         run: |
           test -d upstream/src/third_party/boringssl/src
           git -C upstream apply --ignore-space-change --whitespace=nowarn --directory=src/third_party/boringssl/src "$GITHUB_WORKSPACE/patches/001-boringssl-reality.patch"
+          git -C upstream apply --ignore-space-change --whitespace=nowarn --directory=src/third_party/boringssl/src "$GITHUB_WORKSPACE/patches/011-quic-reality-boringssl.patch"
           test -f upstream/src/net/socket/reality_config.cc
           test -f upstream/src/third_party/boringssl/src/ssl/reality.cc
           grep -q -- '--reality-public-key' upstream/src/net/tools/naive/naive_proxy_bin.cc
+          grep -q -- 'SSL_set1_reality_config_quic' upstream/src/third_party/boringssl/src/include/openssl/ssl.h
+          grep -q -- 'RealityQuicConfig' upstream/src/net/third_party/quiche/src/quiche/quic/core/quic_types.h
           git -C upstream diff --check
       - name: Cache toolchains (Linux)
         uses: actions/cache@v4
@@ -172,13 +175,16 @@ jobs:
           test "$(cat CHROMIUM_VERSION)" = "$(cat upstream/CHROMIUM_VERSION)"
       - name: Apply REALITY patches
         run: |
-          for p in 002-net-reality-plumbing 003-spider-mode 004-net-build-registration 010-quic-hysteria2-bbr-tuning; do
+          for p in 002-net-reality-plumbing 003-spider-mode 004-net-build-registration 010-quic-hysteria2-bbr-tuning 012-quic-reality-net; do
             git -C upstream apply --ignore-space-change --whitespace=nowarn --directory=src "$GITHUB_WORKSPACE/patches/$p.patch"
           done
           git -C upstream apply --ignore-space-change --whitespace=nowarn --directory=src/third_party/boringssl/src "$GITHUB_WORKSPACE/patches/001-boringssl-reality.patch"
+          git -C upstream apply --ignore-space-change --whitespace=nowarn --directory=src/third_party/boringssl/src "$GITHUB_WORKSPACE/patches/011-quic-reality-boringssl.patch"
           test -f upstream/src/net/socket/reality_config.cc
           test -f upstream/src/third_party/boringssl/src/ssl/reality.cc
           grep -q -- '--reality-public-key' upstream/src/net/tools/naive/naive_proxy_bin.cc
+          grep -q -- 'SSL_set1_reality_config_quic' upstream/src/third_party/boringssl/src/include/openssl/ssl.h
+          grep -q -- 'RealityQuicConfig' upstream/src/net/third_party/quiche/src/quiche/quic/core/quic_types.h
       - name: Cache toolchains
         uses: actions/cache@v4
         with:
@@ -268,3 +274,29 @@ jobs:
           ls -la /tmp/kernel
       - name: REALITY full-chain e2e
         run: bash tests/ci-reality-e2e.sh /tmp/kernel
+
+  quic-reality-e2e:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.target != 'arm64' }}
+    # REALITY-over-QUIC full-chain test: patched kernel (quic:// + reality
+    # flags) -> h3frontend (mode=reality) -> official naive server.
+    needs: linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - uses: actions/download-artifact@v4
+        with:
+          name: kernel-x64
+          path: /tmp/kernel-artifact
+      - name: Extract kernel
+        run: |
+          mkdir -p /tmp/kernel
+          tar xf /tmp/kernel-artifact/*.tar.xz -C /tmp/kernel --strip-components=1
+          ls -la /tmp/kernel
+      - name: Build h3frontend
+        working-directory: h3frontend
+        run: go build -o /tmp/naivereal-h3frontend .
+      - name: QUIC REALITY full-chain e2e
+        run: bash tests/quic-reality-e2e.sh /tmp/kernel

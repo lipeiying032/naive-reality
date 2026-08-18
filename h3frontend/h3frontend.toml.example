@@ -1,10 +1,32 @@
-# Standard HTTP/3 CONNECT frontend. This file intentionally has no REALITY
-# configuration; REALITY is not implemented on the H3 path.
+# HTTP/3 CONNECT frontend: standard TLS mode or REALITY-over-QUIC mode.
+#
+# mode = "tls"      (default) standard TLS with your own cert/key; works with
+#                   the official naiveproxy client (quic:// without reality).
+# mode = "reality"  REALITY-over-QUIC (C-gamma): presents Dest's real cert
+#                   chain signed with a throwaway key; only patched naiveproxy
+#                   clients that send the REALITY auth payload in the
+#                   ClientHello random field are proxied; unauthenticated
+#                   probes are relayed verbatim to dest.
 listen = "0.0.0.0:443"
+mode = "tls"
 
+# Used when mode = "tls".
 [tls]
 cert = "/etc/naivereal/fullchain.pem"
 key = "/etc/naivereal/privkey.pem"
+
+# Used when mode = "reality". Generate the keypair with:
+#   naivereal-h3frontend genkey
+[reality]
+private_key = ""                        # base64url X25519 (required)
+short_ids = ["0123456789abcdef"]        # hex, <=16 chars; "" allowed
+server_names = ["www.microsoft.com"]    # SNI whitelist (required)
+dest = "www.microsoft.com:443"          # probe relay target (UDP, required)
+dest_server_name = "www.microsoft.com"  # SNI used to fetch dest cert chain; default = server_names[0]
+# h3_cert = "/etc/naivereal/fullchain.pem"   # optional: operator-owned cert+key
+# h3_key  = "/etc/naivereal/privkey.pem"     # used instead of dest chain fetch
+max_time_diff = 0                       # ms; 0 = disabled
+fallback_timeout = "120s"
 
 [quic]
 initPacketSize = 1200

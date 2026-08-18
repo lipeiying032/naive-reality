@@ -1,6 +1,18 @@
 # 项目状态
 
-更新时间: 2026-08-15.
+更新时间: 2026-08-18.
+
+## 最新进展: QUIC REALITY(分支 agent/h3-reality-quic)
+
+- h3frontend 新增 `mode = "reality"`: C-gamma REALITY-over-QUIC 服务端
+  (配置 `[reality]` 块、`genkey`、dest 证书链 + 一次性密钥、QUIC Initial 预检 +
+  SNI 感知 UDP relay、`ClientHelloVerifier` random 字段认证)。
+- 客户端内核新增 patches/011(QUIC BoringSSL: random 字段认证 + 跳过
+  CertificateVerify + `SSL_set1_reality_config_quic`)与 patches/012(net/quiche:
+  `QuicSSLConfig.reality`、SNI 覆盖、ProofVerifier 旁路)。
+- CI: build-kernel 应用 011/012, 新增 `quic-reality-e2e` 任务。
+- TUI(naivereal-tui, 分支 agent/quic-reality): 支持 `quic://` 与
+  `naivereal+quic://` 分享链接, coremgr 生成 `proxy=quic://` 并携带 reality 块。
 
 ## 已完成
 

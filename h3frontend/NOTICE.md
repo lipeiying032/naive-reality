@@ -2,6 +2,17 @@
 
 This component links against and contains code derived from:
 
+## h3-reality-deploy (REALITY-over-QUIC precheck / relay)
+
+Source: https://github.com/lipeiying032/h3-reality-deploy (MIT; Xray-core MIT)
+Files adapted into this directory:
+- `reality_precheck.go` — QUIC Initial decryption / ClientHello extraction
+- `reality_precheck_conn.go` — PENDING/AUTH/RELAY precheck state machine
+- `reality_relay.go` — 5-tuple UDP NAT relay
+- `third_party/xtls-reality/` — vendored extended `github.com/xtls/reality`
+  fork (same pseudo-version as upstream plus QUIC random-field auth,
+  ClientHelloVerifier and dest-cert-chain helpers)
+
 ## apernet/quic-go
 
 https://github.com/apernet/quic-go
