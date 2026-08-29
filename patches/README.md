@@ -9,8 +9,9 @@ For TCP the wire format follows Xray's REALITY (`transport/internet/reality/real
 `UClient`). For QUIC the C-gamma stage-2 variant is used: the auth payload is sealed
 into the ClientHello **random field** (session_id stays empty per RFC 9001). Ordinary
 certificate-chain/CertificateVerify verification is replaced by a per-connection
-HMAC proof in the server certificate; only the server that verified the client
-credential can produce it. No GPL/MPL code was copied — everything here is
+HMAC proof in the CertificateVerify signature; only the server that verified the
+client credential can produce it. The borrowed destination chain is preserved.
+No GPL/MPL code was copied — everything here is
 implemented from the protocol description in the reference implementation.
 
 **Wire-format reference (interop-verified).** The repo's Go test client
@@ -166,9 +167,9 @@ flow into quic-go.
    QUIC groups and hybrid X25519MLKEM768 key share are preserved (the server's
    `extractClientKeyShare` handles both X25519 and the hybrid trailing bytes).
 3. **Server proof (011).** `do_read_server_certificate_verify` first requires
-   `ssl_reality_verify_quic_certificate()` to find the expected HMAC proof in
-   the peer certificate. It then skips ordinary chain/CertificateVerify checks
-   when `reality_configured && reality_quic`.
+   `ssl_reality_verify_quic_certificate()` to verify the expected HMAC proof in
+   the CertificateVerify signature bytes. It then skips ordinary
+   chain/CertificateVerify checks when `reality_configured && reality_quic`.
 4. **net wiring (012).** A quiche-side `RealityQuicConfig` is added to
    `QuicSSLConfig`; `QuicChromiumClientSession::GetSSLConfig()` populates it
    from the global `net::GetRealityConfig()`; `TlsConnection` applies
@@ -188,7 +189,8 @@ flow into quic-go.
   X25519 + no tickets (ALPN remains caller-configured), so resumption/ECH/DTLS
   paths are not exercised. The QUIC path (011/012) keeps Chromium's default groups,
   disables tickets, and replaces ordinary certificate verification with the
-  per-connection server proof — h3frontend mode=reality is the matching server.
+  per-connection CertificateVerify proof — h3frontend mode=reality is the
+  matching server.
 - **SNI == server_name == proxy host.** The REALITY cert check's "real target" branch
   verifies the certificate against the normal SNI (`host_and_port_.host()`). In the
   intended setup the proxy host equals the REALITY `server_name`, so they coincide.
@@ -246,4 +248,4 @@ flow into quic-go.
    `quic-reality-e2e`): patched `naive --proxy=quic://...` + `--reality-*` flags →
    h3frontend (mode=reality, h3_cert/h3_key) → official naive server. Confirm the
    ClientHello random field is the 32-byte AEAD blob and the handshake completes
-   without CertificateVerify verification.
+   after the CertificateVerify proof is verified.
