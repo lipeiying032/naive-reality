@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -33,7 +34,7 @@ func (c certificateCallbackConn) SetDeadline(time.Time) error      { return nil 
 func (c certificateCallbackConn) SetReadDeadline(time.Time) error  { return nil }
 func (c certificateCallbackConn) SetWriteDeadline(time.Time) error { return nil }
 
-func TestRealityTLSCertificateCarriesConnectionProof(t *testing.T) {
+func TestRealityTLSCertificateSignerCarriesConnectionProof(t *testing.T) {
 	dir := t.TempDir()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -90,8 +91,22 @@ func TestRealityTLSCertificateCarriesConnectionProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := quicServerProof(authKey); !bytes.Equal(leaf.SubjectKeyId, want) {
-		t.Fatalf("certificate proof mismatch: got %x, want %x", leaf.SubjectKeyId, want)
+	if leaf.SubjectKeyId != nil {
+		t.Fatalf("REALITY certificate unexpectedly changed SubjectKeyId: %x", leaf.SubjectKeyId)
+	}
+	signer, ok := cert.PrivateKey.(crypto.Signer)
+	if !ok {
+		t.Fatalf("certificate private key is %T, want crypto.Signer", cert.PrivateKey)
+	}
+	if !signer.Public().(interface{ Equal(crypto.PublicKey) bool }).Equal(leaf.PublicKey) {
+		t.Fatalf("proof signer public key does not match certificate leaf")
+	}
+	signature, err := signer.Sign(rand.Reader, nil, crypto.Hash(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := quicServerProof(authKey); !bytes.Equal(signature, want) {
+		t.Fatalf("CertificateVerify proof mismatch: got %x, want %x", signature, want)
 	}
 }
 

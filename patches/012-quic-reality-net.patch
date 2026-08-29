@@ -43,17 +43,16 @@ index 13c4e72..075e8da 100644
    if (ssl_config_.early_data_enabled.has_value()) {
      const int early_data_enabled = *ssl_config_.early_data_enabled ? 1 : 0;
      SSL_set_early_data_enabled(ssl(), early_data_enabled);
-@@ -151,7 +159,15 @@ TlsConnection* TlsConnection::ConnectionFromSsl(const SSL* ssl) {
+@@ -151,7 +159,14 @@ TlsConnection* TlsConnection::ConnectionFromSsl(const SSL* ssl) {
  // static
  enum ssl_verify_result_t TlsConnection::VerifyCallback(SSL* ssl,
                                                         uint8_t* out_alert) {
 -  return ConnectionFromSsl(ssl)->delegate_->VerifyCert(out_alert);
 +  TlsConnection* connection = ConnectionFromSsl(ssl);
 +  if (connection->ssl_config_.reality.has_value()) {
-+    // REALITY-over-QUIC: the REALITY credential in the ClientHello random
-+    // field authenticates the server; BoringSSL skips CertificateVerify and
-+    // the server presents Dest's real chain, so Chromium's ProofVerifier is
-+    // bypassed.
++    // REALITY-over-QUIC: BoringSSL verifies the per-connection REALITY proof
++    // in CertificateVerify before replacing Chromium's ordinary certificate
++    // verifier. The borrowed Dest chain is preserved.
 +    return ssl_verify_ok;
 +  }
 +  return connection->delegate_->VerifyCert(out_alert);

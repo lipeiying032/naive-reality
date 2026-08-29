@@ -42,7 +42,7 @@
       "target": "boringssl tree",
       "apply_with": "git apply after 001 from the boringssl root",
       "depends_on": ["001-boringssl-reality.patch"],
-      "description": "BoringSSL: QUIC REALITY variant - SSL_set1_reality_config_quic, seal the auth payload into the ClientHello random field (session_id stays empty per RFC 9001), and require the per-connection server proof in the returned certificate while skipping ordinary chain/CertificateVerify verification."
+      "description": "BoringSSL: QUIC REALITY variant - SSL_set1_reality_config_quic, seal the auth payload into the ClientHello random field (session_id stays empty per RFC 9001), and require the per-connection server proof in the CertificateVerify signature while skipping ordinary chain/CertificateVerify verification."
     },
     {
       "file": "012-quic-reality-net.patch",

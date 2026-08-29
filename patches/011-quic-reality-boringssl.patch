@@ -11,7 +11,7 @@ index 1937629..2cb5519 100644
 +// handshake: the auth payload is sealed into the ClientHello random field
 +// (the session id stays empty, as QUIC requires). Standard certificate-chain
 +// and CertificateVerify checks are replaced by a per-connection REALITY
-+// server proof carried in the server certificate. Unlike the TCP variant it
++// server proof carried in the CertificateVerify signature. Unlike the TCP variant it
 +// does not restrict the key-share groups, so the ClientHello keeps Chromium's
 +// default groups and hybrid X25519MLKEM768 key share.
 +OPENSSL_EXPORT int SSL_set1_reality_config_quic(
@@ -32,7 +32,7 @@ index 6d7f4aa..5689204 100644
 +  // QUIC keeps the ClientHello session_id empty and seals the auth payload
 +  // into the random field instead. Standard certificate-chain and
 +  // CertificateVerify checks are replaced by the per-connection REALITY
-+  // server proof in the server certificate.
++  // server proof in the CertificateVerify signature.
 +  bool reality_quic = false;
    uint8_t reality_public_key[32] = {0};
    uint8_t reality_short_id[8] = {0};
@@ -40,11 +40,11 @@ index 6d7f4aa..5689204 100644
 diff --git a/ssl/reality.h b/ssl/reality.h
 --- a/ssl/reality.h
 +++ b/ssl/reality.h
-@@ -28,4 +28,7 @@ bool ssl_reality_patch_client_hello(SSL_HANDSHAKE *hs, Array<uint8_t> &msg);
+@@ -28,5 +28,8 @@ bool ssl_reality_patch_client_hello(SSL_HANDSHAKE *hs, Array<uint8_t> &msg);
  bool ssl_reality_patch_client_hello(SSL_HANDSHAKE *hs, Array<uint8_t> &msg);
  
 +// Verifies the per-connection REALITY proof in the peer's certificate.
-+bool ssl_reality_verify_quic_certificate(SSL *ssl);
++bool ssl_reality_verify_quic_certificate(SSL *ssl, const SSLMessage &msg);
 +
  }  // namespace bssl
  
@@ -94,7 +94,7 @@ index 788f723..cabd459 100644
  // reality_seal_session_id computes the 32-byte REALITY session id blob
  // (AES-256-GCM ciphertext || tag) with nonce client_random[20:32] and AAD
  // |hello| (the serialized ClientHello with a zeroed session id).
-@@ -122,6 +130,90 @@ bool reality_seal_session_id(SSL_HANDSHAKE *hs, const uint8_t auth_key[32],
+@@ -122,6 +130,86 @@ bool reality_seal_session_id(SSL_HANDSHAKE *hs, const uint8_t auth_key[32],
    return true;
  }
  
@@ -140,8 +140,8 @@ index 788f723..cabd459 100644
 +}
 +
 +// reality_server_proof computes the per-connection server proof embedded in
-+// the subject-key-id extension of the QUIC REALITY certificate. The client
-+// uses the same AuthKey recovered from the ClientHello credential.
++// the CertificateVerify signature by the QUIC REALITY server. The client uses
++// the same AuthKey recovered from the ClientHello credential.
 +bool reality_server_proof(const SSL *ssl, uint8_t out[64]) {
 +  static const char kContext[] = "naivereal QUIC REALITY server proof v1";
 +  unsigned out_len = 0;
@@ -154,32 +154,28 @@ index 788f723..cabd459 100644
 +         HMAC_Final(hmac.get(), out, &out_len) && out_len == 64;
 +}
 +
-+bool ssl_reality_verify_quic_certificate(SSL *ssl) {
++bool ssl_reality_verify_quic_certificate(SSL *ssl, const SSLMessage &msg) {
 +  if (ssl == nullptr || !ssl->reality_configured || !ssl->reality_quic ||
-+      !ssl->reality_auth_key_set) {
-+    return false;
-+  }
-+  const STACK_OF(CRYPTO_BUFFER) *certs = SSL_get0_peer_certificates(ssl);
-+  if (certs == nullptr || sk_CRYPTO_BUFFER_num(certs) < 1) {
-+    return false;
-+  }
-+  const CRYPTO_BUFFER *leaf = sk_CRYPTO_BUFFER_value(certs, 0);
-+  const uint8_t *der = CRYPTO_BUFFER_data(leaf);
-+  const size_t der_len = CRYPTO_BUFFER_len(leaf);
-+  if (der == nullptr || der_len < 64) {
++      !ssl->reality_auth_key_set || msg.raw.data == nullptr ||
++      msg.raw.len < 8) {
 +    return false;
 +  }
 +
++  // CertificateVerify is signature_algorithm(2) ||
++  // opaque signature<0..2^16-1>. Verify only the final signature bytes.
++  const size_t signature_len =
++      (static_cast<size_t>(msg.raw.data[msg.raw.len - 2]) << 8) |
++      msg.raw.data[msg.raw.len - 1];
++  if (signature_len != 64 || msg.raw.len < signature_len) {
++    return false;
++  }
++  const uint8_t *signature =
++      msg.raw.data + msg.raw.len - static_cast<size_t>(signature_len);
 +  uint8_t expected[64];
 +  if (!reality_server_proof(ssl, expected)) {
 +    return false;
 +  }
-+  for (size_t offset = 0; offset + sizeof(expected) <= der_len; offset++) {
-+    if (CRYPTO_memcmp(der + offset, expected, sizeof(expected)) == 0) {
-+      return true;
-+    }
-+  }
-+  return false;
++  return CRYPTO_memcmp(signature, expected, sizeof(expected)) == 0;
 +}
 +
  }  // namespace
@@ -302,7 +298,7 @@ index c92bb27..bae3a1b 100644
 +  // Standard chain/CertificateVerify verification is therefore replaced.
 +  const bool skip_reality_verify = ssl->reality_configured && ssl->reality_quic;
 +  if (skip_reality_verify &&
-+      !ssl_reality_verify_quic_certificate(ssl)) {
++      !ssl_reality_verify_quic_certificate(ssl, msg)) {
 +    OPENSSL_PUT_ERROR(SSL, ERR_R_INTERNAL_ERROR);
 +    return ssl_hs_error;
 +  }

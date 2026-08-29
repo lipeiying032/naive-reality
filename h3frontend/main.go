@@ -111,7 +111,7 @@ func serve(ctx context.Context, cfg *Config) error {
 		MaxIncomingStreams:             cfg.QUIC.MaxIncomingStreams,
 		DisablePathMTUDiscovery:        cfg.QUIC.DisablePathMTUDiscovery,
 		DisablePathManager:             cfg.QUIC.DisablePathManager,
-		Allow0RTT:                      true,
+		Allow0RTT:                      false,
 		// QLOGDIR enables sampled per-connection qlogs (loss/cwnd/RTT only).
 		Tracer: tracer,
 	}
@@ -146,12 +146,16 @@ func serve(ctx context.Context, cfg *Config) error {
 	}
 	defer listener.Close()
 
-	h3srv := &http3.Server{
-		Handler: &relayHandler{
-			upstream: cfg.Upstream.Addr,
-			dialer:   net.Dialer{Timeout: 10 * time.Second},
-		},
+	dialer := net.Dialer{Timeout: 10 * time.Second}
+	handler := &relayHandler{
+		upstream: cfg.Upstream.Addr,
+		dialer:   dialer,
 	}
+	if cfg.Mode == "reality" && cfg.Reality.DestServerName != "" {
+		handler.fallbackHost = cfg.Reality.DestServerName
+		handler.fallbackClient = newFallbackClient(&dialer, cfg.Reality.DestServerName)
+	}
+	h3srv := &http3.Server{Handler: handler}
 
 	go func() {
 		<-ctx.Done()

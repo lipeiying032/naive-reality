@@ -29,5 +29,5 @@
 
 - 客户端凭据: 因 QUIC 要求空 SessionID, REALITY 认证载荷放在 ClientHello Random(32B).
 - 服务端预检: 解密 QUIC Initial, 重组 ClientHello, 用静态 REALITY 私钥和客户端 X25519 key share 派生 AuthKey 并解密 Random; 未认证流量 relay 到 dest.
-- 服务端证明: 每个已认证 QUIC flow 的 TLS 叶子证书 SubjectKeyId 携带 `HMAC-SHA512(AuthKey, "naivereal QUIC REALITY server proof v1")`.
-- 客户端校验: 补丁内核在跳过普通证书链/CertificateVerify 前, 用同一个 AuthKey 计算期望 proof 并精确匹配; 防止主动中间人只靠伪造证书完成握手.
+- 服务端证明: 每个已认证 QUIC flow 的 CertificateVerify 签名字段携带 `HMAC-SHA512(AuthKey, "naivereal QUIC REALITY server proof v1")`; 默认仍返回 Dest 真实证书链, 不修改证书字节.
+- 客户端校验: 补丁内核在跳过普通证书链/CertificateVerify 前, 从 CertificateVerify 签名字节中用同一个 AuthKey 计算期望 proof 并精确匹配; 防止主动中间人只靠伪造证书完成握手.
