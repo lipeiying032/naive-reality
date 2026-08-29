@@ -71,6 +71,9 @@ type precheckClientState struct {
 	lastSeen  time.Time
 	firstSeen time.Time
 	ip        string
+	// authKey is the per-connection REALITY key recovered from an
+	// authenticated ClientHello. It is set only when state is precheckAuth.
+	authKey []byte
 	// relayDest is the destination set pinned for this flow at the RELAY
 	// decision (all resolved addresses of the configured dest). It is only
 	// touched by the read loop, alongside state. nil means the flow is
@@ -115,7 +118,7 @@ type realityPrecheckPacketConn struct {
 // newRealityPrecheckPacketConn wraps conn with the QUIC precheck + UDP relay.
 // It is a no-op (returns conn) when no Dest is configured. The returned conn
 // owns the relay: Close tears both down.
-func newRealityPrecheckPacketConn(ctx context.Context, conn net.PacketConn, params *realityQUICParams) (net.PacketConn, error) {
+func newRealityPrecheckPacketConn(ctx context.Context, conn net.PacketConn, params *realityQUICParams, authSource *realityAuthSource) (net.PacketConn, error) {
 	if params == nil || params.Dest == "" {
 		return conn, nil
 	}
@@ -145,6 +148,7 @@ func newRealityPrecheckPacketConn(ctx context.Context, conn net.PacketConn, para
 		queue:      make(chan queuedPacket, precheckQueueSize),
 		closed:     make(chan struct{}),
 	}
+	authSource.setLookup(c.authKeyFor)
 	go c.readLoop()
 	go c.reapLoop()
 	return c, nil
@@ -203,6 +207,16 @@ func (c *realityPrecheckPacketConn) IsAuthenticated(clientAddr net.Addr) bool {
 	defer c.mu.Unlock()
 	st := c.states[clientAddr.String()]
 	return st != nil && st.state == precheckAuth
+}
+
+func (c *realityPrecheckPacketConn) authKeyFor(clientAddr net.Addr) ([]byte, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st := c.states[clientAddr.String()]
+	if st == nil || st.state != precheckAuth || len(st.authKey) == 0 {
+		return nil, false
+	}
+	return st.authKey, true
 }
 
 func (c *realityPrecheckPacketConn) relayTimeout() time.Duration {
@@ -378,7 +392,8 @@ func (c *realityPrecheckPacketConn) decidePending(st *precheckClientState, data 
 		c.relayDecision(st, data, addr)
 		return
 	}
-	if err := c.verifier.Verify(hello); err != nil {
+	authKey, err := c.verifier.VerifyAuth(hello)
+	if err != nil {
 		log.Info("reality precheck relay: auth failed", "remote", addr.String(), "err", err)
 		c.relayDecision(st, data, addr)
 		return
@@ -386,6 +401,7 @@ func (c *realityPrecheckPacketConn) decidePending(st *precheckClientState, data 
 	log.Info("reality precheck auth", "remote", addr.String())
 	c.mu.Lock()
 	st.state = precheckAuth
+	st.authKey = authKey
 	c.mu.Unlock()
 	c.flushPending(st, data, addr, false)
 }

@@ -291,7 +291,7 @@ func TestPrecheckPacketConnDecisions(t *testing.T) {
 		Dest:            destConn.LocalAddr().String(),
 		FallbackTimeout: 5 * time.Second,
 	}
-	wrapped, err := newRealityPrecheckPacketConn(context.Background(), serverConn, params)
+	wrapped, err := newRealityPrecheckPacketConn(context.Background(), serverConn, params, &realityAuthSource{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,5 +367,15 @@ func TestPrecheckPacketConnDecisions(t *testing.T) {
 	}
 	if !w.IsAuthenticated(authAddr) {
 		t.Fatal("authenticated client not marked AUTH")
+	}
+}
+
+func TestParserRejectsUnboundedAdversarialInput(t *testing.T) {
+	if got := skipAckFrame([]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}); got >= 0 {
+		t.Fatalf("skipAckFrame accepted an absurd ACK range count: %d", got)
+	}
+	huge := cryptoFrag{off: maxCryptoBufferSize + 1, data: []byte{0}}
+	if buf, filled := mergeCryptoFragTracked(nil, nil, huge); len(buf) != 0 || len(filled) != 0 {
+		t.Fatalf("mergeCryptoFragTracked allocated for oversized fragment: %d/%d", len(buf), len(filled))
 	}
 }

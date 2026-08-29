@@ -2,18 +2,107 @@ package main
 
 import (
 	"context"
-	"crypto"
-	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/hmac"
 	"crypto/rand"
-	"crypto/rsa"
+	"crypto/sha512"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
+	"net"
+	"sync"
 	"time"
 
 	goreality "github.com/xtls/reality"
 )
+
+var quicServerProofContext = []byte("naivereal QUIC REALITY server proof v1")
+
+// realityAuthSource connects the packet-level ClientHello precheck to the
+// crypto/tls certificate callback. quic-go supplies a fake net.Conn carrying
+// the QUIC connection's remote address to that callback.
+type realityAuthSource struct {
+	mu     sync.RWMutex
+	lookup func(net.Addr) ([]byte, bool)
+}
+
+func (s *realityAuthSource) setLookup(lookup func(net.Addr) ([]byte, bool)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lookup = lookup
+}
+
+func (s *realityAuthSource) AuthKeyFor(addr net.Addr) ([]byte, bool) {
+	if s == nil || addr == nil {
+		return nil, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.lookup == nil {
+		return nil, false
+	}
+	return s.lookup(addr)
+}
+
+// quicServerProof proves server possession of the REALITY secret for this
+// connection. AuthKey came from ECDH(client ephemeral, server REALITY private)
+// in the precheck, so only the authenticated server can produce it.
+func quicServerProof(authKey []byte) []byte {
+	mac := hmac.New(sha512.New, authKey)
+	_, _ = mac.Write(quicServerProofContext)
+	return mac.Sum(nil)
+}
+
+// realityCertIssuer issues one short-lived leaf per authenticated connection.
+// The proof is placed in SubjectKeyId; the client checks the exact expected
+// 64 bytes before accepting the REALITY handshake.
+type realityCertIssuer struct {
+	template *x509.Certificate
+	priv     ed25519.PrivateKey
+}
+
+func newRealityCertIssuer(ctx context.Context, params *realityQUICParams) (*realityCertIssuer, error) {
+	var leafDER []byte
+	if params.H3Cert != "" && params.H3Key != "" {
+		cert, err := tls.LoadX509KeyPair(params.H3Cert, params.H3Key)
+		if err != nil {
+			return nil, fmt.Errorf("reality h3 cert/key: %w", err)
+		}
+		leafDER = cert.Certificate[0]
+	} else {
+		fc := &goreality.Config{
+			Dest:           params.Dest,
+			DestServerName: params.DestServerName,
+		}
+		chain := goreality.GetDestCertChain(ctx, fc)
+		if len(chain) == 0 {
+			return nil, fmt.Errorf("reality: failed to fetch dest certificate chain for %q", params.Dest)
+		}
+		leafDER = chain[0]
+	}
+	template, err := x509.ParseCertificate(leafDER)
+	if err != nil {
+		return nil, fmt.Errorf("reality: parse certificate template: %w", err)
+	}
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	return &realityCertIssuer{template: template, priv: priv}, nil
+}
+
+func (i *realityCertIssuer) certificate(proof []byte) (tls.Certificate, error) {
+	template := *i.template
+	template.PublicKey = i.priv.Public()
+	template.SubjectKeyId = proof
+	template.SignatureAlgorithm = x509.PureEd25519
+	der, err := x509.CreateCertificate(rand.Reader, &template, &template, i.priv.Public(), i.priv)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: i.priv}, nil
+}
 
 // realityQUICParams carries the REALITY-over-QUIC server parameters used by
 // the precheck/relay wrapper and the TLS listener. It mirrors the reference
@@ -67,71 +156,35 @@ func buildRealityParams(cfg *Config) (*realityQUICParams, error) {
 	}, nil
 }
 
-// buildRealityTLSConfig builds the standard crypto/tls config for the QUIC
-// listener in REALITY mode. It presents the operator-owned h3_cert/h3_key
-// pair when configured, otherwise Dest's real certificate chain signed with
-// a throwaway key (only clients that skip CertificateVerify verification can
-// complete the handshake).
-func buildRealityTLSConfig(ctx context.Context, params *realityQUICParams) (*tls.Config, error) {
+// buildRealityTLSConfig builds the crypto/tls config for the QUIC listener in
+// REALITY mode. GetCertificate issues a short-lived leaf for each flow that
+// passed precheck; its SubjectKeyId carries the per-connection server proof.
+// The operator's h3_cert/h3_key (or Dest's real leaf) supplies only the
+// certificate identity template.
+func buildRealityTLSConfig(ctx context.Context, params *realityQUICParams) (*tls.Config, *realityAuthSource, error) {
+	authSource := &realityAuthSource{}
+	issuer, err := newRealityCertIssuer(ctx, params)
+	if err != nil {
+		return nil, nil, err
+	}
 	tlsConf := &tls.Config{
-		MinVersion: tls.VersionTLS13,
-		NextProtos: []string{"h3"},
+		MinVersion:             tls.VersionTLS13,
+		NextProtos:             []string{"h3"},
+		SessionTicketsDisabled: true,
+		GetCertificate: func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			if info == nil || info.Conn == nil {
+				return nil, errors.New("reality: no connection for certificate callback")
+			}
+			authKey, ok := authSource.AuthKeyFor(info.Conn.RemoteAddr())
+			if !ok {
+				return nil, fmt.Errorf("reality: no authenticated QUIC flow for %s", info.Conn.RemoteAddr())
+			}
+			cert, err := issuer.certificate(quicServerProof(authKey))
+			if err != nil {
+				return nil, err
+			}
+			return &cert, nil
+		},
 	}
-	if params.H3Cert != "" && params.H3Key != "" {
-		cert, err := tls.LoadX509KeyPair(params.H3Cert, params.H3Key)
-		if err != nil {
-			return nil, fmt.Errorf("reality h3 cert/key: %w", err)
-		}
-		tlsConf.Certificates = []tls.Certificate{cert}
-		return tlsConf, nil
-	}
-
-	cert, err := destCertChainTLS(ctx, params)
-	if err != nil {
-		return nil, err
-	}
-	tlsConf.Certificates = []tls.Certificate{cert}
-	return tlsConf, nil
-}
-
-// destCertChainTLS fetches Dest's real certificate chain and pairs it with a
-// freshly generated throwaway key of the matching type.
-func destCertChainTLS(ctx context.Context, params *realityQUICParams) (tls.Certificate, error) {
-	fc := &goreality.Config{
-		Dest:           params.Dest,
-		DestServerName: params.DestServerName,
-	}
-	chain := goreality.GetDestCertChain(ctx, fc)
-	if len(chain) == 0 {
-		return tls.Certificate{}, fmt.Errorf("reality: failed to fetch dest certificate chain for %q", params.Dest)
-	}
-	priv, err := newThrowawayKeyForCert(chain[0])
-	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("reality: throwaway key for dest cert: %w", err)
-	}
-	return tls.Certificate{Certificate: chain, PrivateKey: priv}, nil
-}
-
-// newThrowawayKeyForCert returns a freshly generated private key whose type
-// matches the certificate's public key, so the TLS 1.3 CertificateVerify
-// signature algorithm is compatible with the served leaf certificate.
-func newThrowawayKeyForCert(der []byte) (crypto.Signer, error) {
-	leaf, err := x509.ParseCertificate(der)
-	if err != nil {
-		return nil, err
-	}
-	switch pub := leaf.PublicKey.(type) {
-	case *rsa.PublicKey:
-		return rsa.GenerateKey(rand.Reader, 2048)
-	case *ecdsa.PublicKey:
-		return ecdsa.GenerateKey(pub.Curve, rand.Reader)
-	case ed25519.PublicKey:
-		_, priv, err := ed25519.GenerateKey(rand.Reader)
-		return priv, err
-	default:
-		// Fallback for unknown key types: Ed25519 is always supported by the
-		// stock TLS stack.
-		_, priv, err := ed25519.GenerateKey(rand.Reader)
-		return priv, err
-	}
+	return tlsConf, authSource, nil
 }

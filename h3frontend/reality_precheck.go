@@ -23,7 +23,15 @@ import (
 // sentinel so callers can preserve relay semantics for probes.
 var errNotQUICInitial = errors.New("not a QUIC Initial packet")
 
-const quicV1MaxConnectionIDLen = 20
+const (
+	quicV1MaxConnectionIDLen = 20
+	// A ClientHello is normally a few KiB. This cap still leaves generous
+	// headroom for GREASE and post-quantum key shares while preventing a
+	// forged CRYPTO offset from making the reassembler allocate memory.
+	maxCryptoBufferSize = 128 * 1024
+	// ACK frames from an Initial flight do not need unbounded range counts.
+	maxAckRanges = 1024
+)
 
 func isNotQUICInitial(err error) bool {
 	return errors.Is(err, errNotQUICInitial)
@@ -375,11 +383,17 @@ func parseCryptoFrames(payload []byte) []cryptoFrag {
 			offset += n1
 			fragLen, n2 := readVarint(payload[offset:])
 			offset += n2
+			if n1 == 0 || n2 == 0 {
+				return frags
+			}
 			if fragLen > uint64(len(payload)-offset) {
 				return frags
 			}
-			maxInt := uint64(^uint(0) >> 1)
-			if fragOff > maxInt {
+			if fragOff > maxCryptoBufferSize {
+				return frags
+			}
+			end := int(fragOff) + int(fragLen)
+			if end > maxCryptoBufferSize {
 				return frags
 			}
 			frags = append(frags, cryptoFrag{off: int(fragOff), data: payload[offset : offset+int(fragLen)]})
@@ -407,15 +421,25 @@ func skipAckFrame(data []byte) int {
 	// ACK Range Count (varint)
 	count, n := readVarint(data[offset:])
 	offset += n
+	if n == 0 || count == 0 || count > maxAckRanges {
+		return -1
+	}
 	// First ACK Range (varint)
 	_, n = readVarint(data[offset:])
 	offset += n
+	if n == 0 {
+		return -1
+	}
 	// Additional ACK Ranges: each has gap + ack_range
 	for i := uint64(0); i < count-1; i++ {
+		before := offset
 		_, n = readVarint(data[offset:])
 		offset += n
 		_, n = readVarint(data[offset:])
 		offset += n
+		if offset == before || offset > len(data) {
+			return -1
+		}
 	}
 	return offset
 }
@@ -425,6 +449,9 @@ func skipAckFrame(data []byte) int {
 // TLS ClientHello always starts at offset 0.
 func mergeCryptoFrag(buf []byte, frag cryptoFrag) []byte {
 	end := frag.off + len(frag.data)
+	if frag.off < 0 || end > maxCryptoBufferSize {
+		return buf
+	}
 	if end > len(buf) {
 		grown := make([]byte, end)
 		copy(grown, buf)
@@ -439,6 +466,9 @@ func mergeCryptoFrag(buf []byte, frag cryptoFrag) []byte {
 // that leave gaps in the ClientHello reassembly).
 func mergeCryptoFragTracked(buf []byte, filled []bool, frag cryptoFrag) ([]byte, []bool) {
 	end := frag.off + len(frag.data)
+	if frag.off < 0 || end > maxCryptoBufferSize {
+		return buf, filled
+	}
 	if end > len(buf) {
 		grown := make([]byte, end)
 		copy(grown, buf)

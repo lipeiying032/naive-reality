@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -8,13 +9,91 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/pem"
 	"math/big"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/apernet/quic-go"
 )
+
+type certificateCallbackConn struct {
+	remote net.Addr
+}
+
+func (c certificateCallbackConn) Read([]byte) (int, error)         { return 0, nil }
+func (c certificateCallbackConn) Write([]byte) (int, error)        { return 0, nil }
+func (c certificateCallbackConn) Close() error                     { return nil }
+func (c certificateCallbackConn) LocalAddr() net.Addr              { return nil }
+func (c certificateCallbackConn) RemoteAddr() net.Addr             { return c.remote }
+func (c certificateCallbackConn) SetDeadline(time.Time) error      { return nil }
+func (c certificateCallbackConn) SetReadDeadline(time.Time) error  { return nil }
+func (c certificateCallbackConn) SetWriteDeadline(time.Time) error { return nil }
+
+func TestRealityTLSCertificateCarriesConnectionProof(t *testing.T) {
+	dir := t.TempDir()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "example.test"},
+		DNSNames:     []string{"example.test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPath := filepath.Join(dir, "cert.pem")
+	keyPath := filepath.Join(dir, "key.pem")
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	params := &realityQUICParams{
+		Dest:           "example.test:443",
+		DestServerName: "example.test",
+		H3Cert:         certPath,
+		H3Key:          keyPath,
+	}
+	tlsConf, authSource, err := buildRealityTLSConfig(context.Background(), params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := authSource.AuthKeyFor(&net.TCPAddr{}); ok {
+		t.Fatal("auth source unexpectedly returned a key before authentication")
+	}
+
+	authKey := bytes.Repeat([]byte{0x42}, 32)
+	authSource.setLookup(func(net.Addr) ([]byte, bool) { return authKey, true })
+	info := &tls.ClientHelloInfo{Conn: certificateCallbackConn{remote: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 44444}}}
+	cert, err := tlsConf.GetCertificate(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := quicServerProof(authKey); !bytes.Equal(leaf.SubjectKeyId, want) {
+		t.Fatalf("certificate proof mismatch: got %x, want %x", leaf.SubjectKeyId, want)
+	}
+}
 
 // TestParseRealQUICInitialFromGoClient feeds a real quic-go client's first
 // Initial datagram through parseQUICInitial to prove the RFC 9001 decryption
@@ -27,10 +106,6 @@ func TestParseRealQUICInitialFromGoClient(t *testing.T) {
 	}
 	defer serverRaw.Close()
 
-	type captured struct {
-		data []byte
-		ok   bool
-	}
 	// A quic-go ClientHello often spans several Initial datagrams (MTU ~1200
 	// bytes), so collect a handful and merge their CRYPTO frames.
 	datagrams := make(chan []byte, 16)
@@ -95,33 +170,5 @@ func TestParseRealQUICInitialFromGoClient(t *testing.T) {
 	select {
 	case <-dialDone:
 	case <-time.After(time.Second):
-	}
-}
-
-// makeTestTLSConfig is a helper for H3 reality integration tests: it
-// generates a self-signed TLS 1.3 config for the given DNS name.
-func makeTestTLSConfig(t *testing.T, dnsName string) *tls.Config {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: dnsName},
-		DNSNames:     []string{dnsName},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &tls.Config{
-		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}},
-		MinVersion:   tls.VersionTLS13,
-		NextProtos:   []string{"h3"},
 	}
 }

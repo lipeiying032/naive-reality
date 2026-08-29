@@ -24,3 +24,10 @@
 - 客户端证书校验: 叶子 ed25519 且 HMAC-SHA512(Key, 公钥)==证书签名 -> 真服务端; 否则正常 CA 链 -> 真目标站 -> 蜘蛛模式; 否则断开
 - 注意: session-id 认证仅用于筛选探测流量, 真正的用户认证是 naive Basic 认证
 - 参考: XTLS/REALITY(服务端 fork), XTLS/Xray-core transport/internet/reality/reality.go(UClient)
+
+## REALITY-over-QUIC(naivereal 扩展)
+
+- 客户端凭据: 因 QUIC 要求空 SessionID, REALITY 认证载荷放在 ClientHello Random(32B).
+- 服务端预检: 解密 QUIC Initial, 重组 ClientHello, 用静态 REALITY 私钥和客户端 X25519 key share 派生 AuthKey 并解密 Random; 未认证流量 relay 到 dest.
+- 服务端证明: 每个已认证 QUIC flow 的 TLS 叶子证书 SubjectKeyId 携带 `HMAC-SHA512(AuthKey, "naivereal QUIC REALITY server proof v1")`.
+- 客户端校验: 补丁内核在跳过普通证书链/CertificateVerify 前, 用同一个 AuthKey 计算期望 proof 并精确匹配; 防止主动中间人只靠伪造证书完成握手.

@@ -7,9 +7,10 @@ a plain TLS handshake. The server side is the existing Go REALITY server
 
 For TCP the wire format follows Xray's REALITY (`transport/internet/reality/reality.go`,
 `UClient`). For QUIC the C-gamma stage-2 variant is used: the auth payload is sealed
-into the ClientHello **random field** (session_id stays empty per RFC 9001), and the
-client skips CertificateVerify verification (the server presents Dest's real chain
-signed with a throwaway key). No GPL/MPL code was copied — everything here is
+into the ClientHello **random field** (session_id stays empty per RFC 9001). Ordinary
+certificate-chain/CertificateVerify verification is replaced by a per-connection
+HMAC proof in the server certificate; only the server that verified the client
+credential can produce it. No GPL/MPL code was copied — everything here is
 implemented from the protocol description in the reference implementation.
 
 **Wire-format reference (interop-verified).** The repo's Go test client
@@ -37,7 +38,7 @@ the ordinary h2 CONNECT, exactly like upstream naive.
 | `003-spider-mode.patch` | `E:\deepseekwork\naivereal\src` | spider mode (one GET to the real target, then fail) |
 | `004-net-build-registration.patch` | `E:\deepseekwork\naivereal\src` | registers net/socket/reality_config.{cc,h} in src/net/BUILD.gn |
 | `010-quic-hysteria2-bbr-tuning.patch` | `E:\deepseekwork\naivereal\src` | Hysteria2-aligned QUIC windows/socket buffers/BBR profiles |
-| `011-quic-reality-boringssl.patch` | boringssl tree | QUIC REALITY: random-field auth, `SSL_set1_reality_config_quic`, skip CertificateVerify |
+| `011-quic-reality-boringssl.patch` | boringssl tree | QUIC REALITY: random-field auth, `SSL_set1_reality_config_quic`, verify per-connection server proof |
 | `012-quic-reality-net.patch` | `E:\deepseekwork\naivereal\src` | thread global RealityConfig into QUIC TLS handshake (QuicSSLConfig.reality, SNI override, ProofVerifier bypass) |
 | `manifest.json` | — | patch order / dependencies / apply notes |
 
@@ -164,8 +165,9 @@ flow into quic-go.
    `SSL_set1_group_ids` / `SSL_set1_client_key_shares`, so Chromium's default
    QUIC groups and hybrid X25519MLKEM768 key share are preserved (the server's
    `extractClientKeyShare` handles both X25519 and the hybrid trailing bytes).
-3. **Skip CertificateVerify (011).** `do_read_server_certificate_verify`
-   skips both `ssl_verify_peer_cert` and `tls13_process_certificate_verify`
+3. **Server proof (011).** `do_read_server_certificate_verify` first requires
+   `ssl_reality_verify_quic_certificate()` to find the expected HMAC proof in
+   the peer certificate. It then skips ordinary chain/CertificateVerify checks
    when `reality_configured && reality_quic`.
 4. **net wiring (012).** A quiche-side `RealityQuicConfig` is added to
    `QuicSSLConfig`; `QuicChromiumClientSession::GetSSLConfig()` populates it
@@ -185,8 +187,8 @@ flow into quic-go.
 - **No ECH, no DTLS, no session resumption (TCP REALITY).** TCP REALITY forces TLS 1.3 +
   X25519 + no tickets (ALPN remains caller-configured), so resumption/ECH/DTLS
   paths are not exercised. The QUIC path (011/012) keeps Chromium's default groups,
-  disables tickets, and skips CertificateVerify — h3frontend mode=reality is the
-  matching server.
+  disables tickets, and replaces ordinary certificate verification with the
+  per-connection server proof — h3frontend mode=reality is the matching server.
 - **SNI == server_name == proxy host.** The REALITY cert check's "real target" branch
   verifies the certificate against the normal SNI (`host_and_port_.host()`). In the
   intended setup the proxy host equals the REALITY `server_name`, so they coincide.
