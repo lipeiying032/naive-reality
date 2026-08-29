@@ -139,6 +139,8 @@ index 788f723..cabd459 100644
 +  return true;
 +}
 +
+ }  // namespace
+ 
 +// reality_server_proof computes the per-connection server proof embedded in
 +// the CertificateVerify signature by the QUIC REALITY server. The client uses
 +// the same AuthKey recovered from the ClientHello credential.
@@ -178,8 +180,6 @@ index 788f723..cabd459 100644
 +  return CRYPTO_memcmp(signature, expected, sizeof(expected)) == 0;
 +}
 +
- }  // namespace
- 
  bool ssl_reality_patch_client_hello(SSL_HANDSHAKE *hs, Array<uint8_t> &msg) {
 @@ -129,6 +221,46 @@ bool ssl_reality_patch_client_hello(SSL_HANDSHAKE *hs, Array<uint8_t> &msg) {
    if (!ssl->reality_configured) {
