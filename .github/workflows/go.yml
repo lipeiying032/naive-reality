@@ -2,9 +2,9 @@ name: go
 
 on:
   push:
-    paths: ["frontend/**", "tui/**", "tests/**", ".github/workflows/go.yml"]
+    paths: ["frontend/**", "h3frontend/**", "tui/**", "tests/**", ".github/workflows/go.yml"]
   pull_request:
-    paths: ["frontend/**", "tui/**", "tests/**", ".github/workflows/go.yml"]
+    paths: ["frontend/**", "h3frontend/**", "tui/**", "tests/**", ".github/workflows/go.yml"]
 
 jobs:
   test:
@@ -25,6 +25,15 @@ jobs:
         run: go vet ./...
       - name: Build frontend
         working-directory: frontend
+        run: go build ./...
+      - name: Test h3frontend
+        working-directory: h3frontend
+        run: go test -race ./...
+      - name: Vet h3frontend
+        working-directory: h3frontend
+        run: go vet ./...
+      - name: Build h3frontend
+        working-directory: h3frontend
         run: go build ./...
       - name: Download official naive core for Windows e2e
         if: runner.os == 'Windows'

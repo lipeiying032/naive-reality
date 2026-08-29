@@ -20,8 +20,8 @@ func TestLoadConfigDefaultsAndValidation(t *testing.T) {
 	cfg := `
 listen = "127.0.0.1:0"
 [tls]
-cert = "` + cert + `"
-key = "` + key + `"
+	cert = '` + cert + `'
+	key = '` + key + `'
 [upstream]
 addr = "127.0.0.1:18080"
 `
@@ -150,7 +150,7 @@ private_key = "` + testRealityPrivKey + `"
 short_ids = ["01"]
 server_names = ["a.com"]
 dest = "a.com:443"
-h3_cert = "` + cert + `"
+	h3_cert = '` + cert + `'
 [upstream]
 addr = "127.0.0.1:18080"
 `

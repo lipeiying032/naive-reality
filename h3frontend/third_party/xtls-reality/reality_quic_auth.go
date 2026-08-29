@@ -370,28 +370,42 @@ type ClientHelloVerifier struct {
 	Cfg *Config
 }
 
-// Verify runs the full REALITY ClientHello authentication (SNI whitelist,
-// session_id payload, key share, ECDH+HKDF, AEAD, version/time/shortId) on a
-// raw TLS ClientHello handshake message. It returns nil when the ClientHello
-// carries a valid REALITY payload for Cfg.
-func (v *ClientHelloVerifier) Verify(rawHandshakeMsg []byte) error {
+// VerifyAuth runs the full REALITY ClientHello authentication (SNI whitelist,
+// key share, ECDH+HKDF, AEAD, version/time/shortId) on a raw TLS ClientHello
+// handshake message. On success it returns the connection-specific AuthKey so
+// the TLS layer can prove server possession of the same REALITY secret.
+func (v *ClientHelloVerifier) VerifyAuth(rawHandshakeMsg []byte) ([]byte, error) {
 	if v == nil || v.Cfg == nil {
-		return nil
+		return nil, errors.New("REALITY: verifier is not configured")
 	}
 	var hello clientHelloMsg
 	if !hello.unmarshal(rawHandshakeMsg) {
-		return errors.New("REALITY: failed to unmarshal ClientHello")
+		return nil, errors.New("REALITY: failed to unmarshal ClientHello")
 	}
 	// Stage-2 QUIC mode: the authentication payload lives in the random
 	// field. Try it first; the session_id branch below stays as a
 	// backward-compatible fallback for TCP REALITY / older clients.
 	if auth, err := verifyClientHelloRandom(&hello, v.Cfg); err == nil {
-		if auth != nil {
-			hello.auth = auth
+		if auth == nil {
+			return nil, errors.New("REALITY: verifier is not configured")
 		}
-		return nil
+		return auth.authKey, nil
 	}
-	return verifyClientHello(&hello, v.Cfg)
+	if err := verifyClientHello(&hello, v.Cfg); err != nil {
+		return nil, err
+	}
+	if hello.auth == nil {
+		return nil, errors.New("REALITY: authentication produced no key")
+	}
+	return hello.auth.authKey, nil
+}
+
+// Verify runs the full REALITY ClientHello authentication on a raw TLS
+// ClientHello handshake message. It returns nil when the ClientHello carries a
+// valid REALITY payload for Cfg.
+func (v *ClientHelloVerifier) Verify(rawHandshakeMsg []byte) error {
+	_, err := v.VerifyAuth(rawHandshakeMsg)
+	return err
 }
 
 // ---------------------------------------------------------------------------

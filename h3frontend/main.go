@@ -66,6 +66,7 @@ func setLogLevel(level string) {
 func serve(ctx context.Context, cfg *Config) error {
 	var params *realityQUICParams
 	var tlsConf *tls.Config
+	var authSource *realityAuthSource
 	switch cfg.Mode {
 	case "reality":
 		var err error
@@ -73,7 +74,7 @@ func serve(ctx context.Context, cfg *Config) error {
 		if err != nil {
 			return err
 		}
-		tlsConf, err = buildRealityTLSConfig(ctx, params)
+		tlsConf, authSource, err = buildRealityTLSConfig(ctx, params)
 		if err != nil {
 			return err
 		}
@@ -129,7 +130,7 @@ func serve(ctx context.Context, cfg *Config) error {
 
 	var conn net.PacketConn = udpConn
 	if cfg.Mode == "reality" {
-		conn, err = newRealityPrecheckPacketConn(ctx, udpConn, params)
+		conn, err = newRealityPrecheckPacketConn(ctx, udpConn, params, authSource)
 		if err != nil {
 			_ = udpConn.Close()
 			return fmt.Errorf("reality precheck: %w", err)

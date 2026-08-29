@@ -133,7 +133,7 @@ func startMockUpstream(t *testing.T) (addr string, echoPayload []byte) {
 					return
 				}
 				io.WriteString(c, "HTTP/1.1 200 OK\r\nPadding: abcdefg\r\nPadding-Type-Reply: 1\r\n\r\n")
-				io.WriteString(c, string(echoPayload))
+				_, _ = c.Write(echoPayload)
 				io.Copy(c, br)
 			}(c)
 		}
