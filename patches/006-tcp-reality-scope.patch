@@ -1,0 +1,34 @@
+diff --git a/net/tools/naive/naive_config.cc b/net/tools/naive/naive_config.cc
+--- a/net/tools/naive/naive_config.cc
++++ b/net/tools/naive/naive_config.cc
+@@ -187,6 +187,14 @@
+ NaiveConfig::~NaiveConfig() = default;
+
+ bool NaiveConfig::Parse(const base::DictValue& value) {
++  // Retired QUIC tuning is not part of this TCP-only REALITY profile.
++  for (const char* key : {"quic", "quic-bbr-profile",
++                          "quic-disable-socket-recv-optimization"}) {
++    if (value.Find(key) != nullptr) {
++      std::cerr << "Custom QUIC options have been removed" << std::endl;
++      return false;
++    }
++  }
+   if (const base::Value* v = value.Find("listen")) {
+     std::vector<std::string> listen_strs;
+     if (const std::string* str = v->GetIfString()) {
+@@ -474,6 +482,15 @@
+     }
+   }
+   if (reality_present) {
++    for (const auto& chain : proxy_chains) {
++      for (const auto& proxy : chain.proxy_servers()) {
++        if (proxy.is_quic()) {
++          std::cerr << "REALITY is supported only for TCP; use native-h3 and "
++                       "an owned TLS certificate for QUIC" << std::endl;
++          return false;
++        }
++      }
++    }
+     if (parsed_reality.server_name.empty()) {
+       std::cerr << "Invalid reality: missing server_name" << std::endl;
+       return false;

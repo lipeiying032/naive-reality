@@ -25,3 +25,10 @@ Linux 交叉编译: $env:GOOS="linux"; $env:GOARCH="amd64"; go build -o naiverea
 
 - Linux: naivereal-frontend(Go 静态) + naive(官方 Linux 构建) + systemd unit
 - Windows: naive.exe(补丁内核) + naivereal-tui.exe + wintun.dll + 文档
+
+## H3 构建 profile（当前默认）
+
+内核默认使用 `native-h3`，只应用配置拒绝补丁 005；网络栈源码保持 CI 固定的上游版本。`scripts/apply-kernel-patches.py` 与 `patches/manifest.json` 是补丁入口。GitHub Build Kernel 可手动选择 `tcp-reality`，该 profile 使用 001–004、006。旧 010/011/012 已移除。
+
+Go H3：`cd h3frontend && go test -race ./... && go vet ./... && go build ./...`。
+迁移测试：`python3 tests/test_h3_migration.py -v`（Python 3.11+）。详见 [H3 架构](h3-origin.md)。

@@ -2,9 +2,9 @@ name: h3frontend
 
 on:
   push:
-    paths: ["h3frontend/**", ".github/workflows/h3frontend.yml"]
+    paths: ["h3frontend/**", "scripts/migrate-h3-config.py", "tests/test_h3_migration.py", ".github/workflows/h3frontend.yml"]
   pull_request:
-    paths: ["h3frontend/**", ".github/workflows/h3frontend.yml"]
+    paths: ["h3frontend/**", "scripts/migrate-h3-config.py", "tests/test_h3_migration.py", ".github/workflows/h3frontend.yml"]
   workflow_dispatch:
 
 jobs:
@@ -15,6 +15,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.x"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Migration tests
+        run: python3 tests/test_h3_migration.py -v
       - name: Test
         working-directory: h3frontend
         run: go test -race ./...

@@ -25,9 +25,8 @@
 - 注意: session-id 认证仅用于筛选探测流量, 真正的用户认证是 naive Basic 认证
 - 参考: XTLS/REALITY(服务端 fork), XTLS/Xray-core transport/internet/reality/reality.go(UClient)
 
-## REALITY-over-QUIC(naivereal 扩展)
+## HTTP/3：标准 TLS（当前默认）
 
-- 客户端凭据: 因 QUIC 要求空 SessionID, REALITY 认证载荷放在 ClientHello Random(32B).
-- 服务端预检: 解密 QUIC Initial, 重组 ClientHello, 用静态 REALITY 私钥和客户端 X25519 key share 派生 AuthKey 并解密 Random; 未认证流量 relay 到 dest.
-- 服务端证明: 每个已认证 QUIC flow 的 CertificateVerify 签名字段携带 `HMAC-SHA512(AuthKey, "naivereal QUIC REALITY server proof v1")`; 默认仍返回 Dest 真实证书链, 不修改证书字节.
-- 客户端校验: 补丁内核在跳过普通证书链/CertificateVerify 前, 从 CertificateVerify 签名字节中用同一个 AuthKey 计算期望 proof 并精确匹配; 防止主动中间人只靠伪造证书完成握手.
+客户端使用上游 Chromium QUICHE/BoringSSL，以自有域名验证标准 TLS 证书。服务端 `mode=origin` 使用同一个 H3/TLS 端点处理网站请求与 CONNECT；只有每请求 HTTP Basic 认证成功的 CONNECT 会转发到本地 naive 上游。CertificateVerify 与 Finished 完整使用标准 TLS 实现，无自定义 proof、Initial 认证预检或 target relay。
+
+旧 QUIC REALITY 已移除，迁移及兼容范围见 [H3 自有站点模式](h3-origin.md)。以上 TCP REALITY 协议说明仅适用于独立 TCP 前端和 `tcp-reality` 内核 profile。

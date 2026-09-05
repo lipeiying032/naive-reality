@@ -1,0 +1,24 @@
+diff --git a/net/tools/naive/naive_config.cc b/net/tools/naive/naive_config.cc
+--- a/net/tools/naive/naive_config.cc
++++ b/net/tools/naive/naive_config.cc
+@@ -75,6 +75,20 @@
+ NaiveConfig::~NaiveConfig() = default;
+
+ bool NaiveConfig::Parse(const base::DictValue& value) {
++  // This build intentionally keeps the upstream QUIC and TLS implementations.
++  // Reject legacy options before opening any sockets instead of silently
++  // treating a REALITY configuration as an ordinary TLS connection.
++  for (const char* key : {"reality", "reality-server-name", "reality-public-key",
++                          "reality-short-id", "quic", "quic-bbr-profile",
++                          "quic-disable-socket-recv-optimization"}) {
++    if (value.Find(key) != nullptr) {
++      std::cerr << "Native H3 build does not support REALITY or custom QUIC "
++                   "options: "
++                << key << std::endl;
++      return false;
++    }
++  }
++
+   if (const base::Value* v = value.Find("listen")) {
+     std::vector<std::string> listen_strs;
+     if (const std::string* str = v->GetIfString()) {

@@ -2,12 +2,10 @@ package main
 
 import (
 	"bufio"
-	"crypto/tls"
 	"errors"
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -22,11 +20,6 @@ type relayHandler struct {
 	upstream string
 	dialer   net.Dialer
 	nextID   atomic.Uint64
-	// fallbackClient serves ordinary h3 requests like the borrowed dest site
-	// when REALITY mode is enabled. It prevents non-CONNECT probes from seeing
-	// a naivereal-specific response.
-	fallbackHost   string
-	fallbackClient *http.Client
 }
 
 type copyResult struct {
@@ -41,10 +34,6 @@ func (h *relayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host := r.Host
 	start := time.Now()
 	if r.Method != http.MethodConnect {
-		if h.fallbackClient != nil && h.fallbackHost != "" {
-			h.serveFallback(w, r)
-			return
-		}
 		log.Debug("h3 non-connect request", "id", rid, "method", r.Method, "host", host, "remote", r.RemoteAddr)
 		w.Header().Set("content-type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusNotFound)
@@ -118,55 +107,6 @@ func (h *relayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		log.Warn("h3 tunnel second direction still open after 5s", "id", rid, "host", host)
 	}
 	log.Debug("h3 tunnel closed", "id", rid, "host", host, "elapsed", time.Since(start))
-}
-
-func (h *relayHandler) serveFallback(w http.ResponseWriter, r *http.Request) {
-	outReq := r.Clone(r.Context())
-	outReq.URL = &url.URL{
-		Scheme:   "https",
-		Host:     h.fallbackHost,
-		Path:     r.URL.Path,
-		RawQuery: r.URL.RawQuery,
-	}
-	outReq.Host = h.fallbackHost
-	outReq.RequestURI = ""
-	for name := range outReq.Header {
-		if isHopByHop(strings.ToLower(name)) || strings.EqualFold(name, "Proxy-Authorization") {
-			outReq.Header.Del(name)
-		}
-	}
-
-	resp, err := h.fallbackClient.Do(outReq)
-	if err != nil {
-		log.Warn("h3 fallback request failed", "host", h.fallbackHost, "err", err)
-		w.WriteHeader(http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-
-	for name, vals := range resp.Header {
-		if isHopByHop(strings.ToLower(name)) {
-			continue
-		}
-		for _, value := range vals {
-			w.Header().Add(name, value)
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
-}
-
-func newFallbackClient(dialer *net.Dialer, serverName string) *http.Client {
-	return &http.Client{
-		Transport: &http.Transport{
-			Proxy:                 nil,
-			DialContext:           dialer.DialContext,
-			TLSClientConfig:       &tls.Config{ServerName: serverName, MinVersion: tls.VersionTLS12},
-			ForceAttemptHTTP2:     true,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ResponseHeaderTimeout: 30 * time.Second,
-		},
-	}
 }
 
 func buildH1Connect(authority string, header http.Header) []byte {

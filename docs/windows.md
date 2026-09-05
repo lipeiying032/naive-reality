@@ -1,5 +1,8 @@
 # Windows 使用说明
 
+> 当前默认内核为 `native-h3`（标准 TLS），旧 REALITY 档案会被拒绝。使用自有域名/证书并按 [H3 迁移文档](h3-origin.md) 转换配置；下文的 TCP REALITY 操作须显式选用 `tcp-reality` 内核。旧 QUIC REALITY 已移除，TUI/v2rayN 档案不会自动迁移。
+
+
 ## 组件
 
 - naive.exe(或自定义名): 客户端内核(官方 naiveproxy + REALITY 补丁), 命令行与官方一致, 支持官方 config.json + 可选 reality 块

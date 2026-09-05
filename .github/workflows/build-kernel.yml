@@ -2,16 +2,24 @@ name: Build Kernel
 
 # This repository contains the REALITY patches (patches/) and Go components;
 # the naiveproxy kernel source itself lives upstream. CI clones upstream at
-# the pinned version (CHROMIUM_VERSION), applies patches/001-004, and builds.
+# the pinned version (CHROMIUM_VERSION), applies the selected profile, and builds.
 on:
   push:
     branches: [main, master]
-    paths: ["patches/**", "tests/**", "CHROMIUM_VERSION", ".github/workflows/build-kernel.yml"]
+    paths: ["patches/**", "scripts/apply-kernel-patches.py", "tests/**", "CHROMIUM_VERSION", ".github/workflows/build-kernel.yml"]
     tags: ["v*", "[0-9]*.[0-9]*.[0-9]*"]
   pull_request:
-    paths: ["patches/**", "tests/**", "CHROMIUM_VERSION", ".github/workflows/build-kernel.yml"]
+    paths: ["patches/**", "scripts/apply-kernel-patches.py", "tests/**", "CHROMIUM_VERSION", ".github/workflows/build-kernel.yml"]
   workflow_dispatch:
     inputs:
+      kernel_profile:
+        description: Kernel protocol profile (native-h3 requires standard TLS)
+        required: true
+        default: native-h3
+        type: choice
+        options:
+          - tcp-reality
+          - native-h3
       target:
         description: Jobs to run
         required: true
@@ -19,7 +27,7 @@ on:
         type: choice
         options:
           - all
-          - reality-e2e
+          - x64
           - arm64
   release:
     types: [published]
@@ -37,6 +45,7 @@ defaults:
     shell: bash
 
 env:
+  KERNEL_PROFILE: ${{ inputs.kernel_profile || 'native-h3' }}
   CACHE_EPOCH: 1
   NAIVE_UPSTREAM_COMMIT: 3ba967e2d36cc133a896e81a36257ad4c6ea20f4
   CCACHE_MAXSIZE: 1G
@@ -49,10 +58,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: ${{ fromJSON(inputs.target == 'reality-e2e' && '["x64"]' || inputs.target == 'arm64' && '["arm64"]' || '["x64", "arm64"]') }}
+        arch: ${{ fromJSON(inputs.target == 'x64' && '["x64"]' || inputs.target == 'arm64' && '["arm64"]' || '["x64", "arm64"]') }}
     env:
       EXTRA_FLAGS: 'target_cpu="${{ matrix.arch }}"'
-      BUNDLE: naivereal-${{ github.event.release.tag_name || 'kernel' }}-${{ github.job }}-${{ matrix.arch }}
+      BUNDLE: naivereal-${{ inputs.kernel_profile == 'tcp-reality' && 'tcp-reality-' || '' }}${{ github.event.release.tag_name || 'kernel' }}-${{ github.job }}-${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v4
       - name: Fetch upstream naiveproxy source
@@ -63,22 +72,16 @@ jobs:
           git -C upstream checkout FETCH_HEAD
           echo "upstream commit: $(git -C upstream rev-parse HEAD)"
           test "$(cat CHROMIUM_VERSION)" = "$(cat upstream/CHROMIUM_VERSION)"
-      - name: Apply REALITY patches (net + spider + build registration)
+      - name: Apply selected kernel profile
         run: |
-          for p in 002-net-reality-plumbing 003-spider-mode 004-net-build-registration 010-quic-hysteria2-bbr-tuning 012-quic-reality-net; do
-            git -C upstream apply --ignore-space-change --whitespace=nowarn --directory=src "$GITHUB_WORKSPACE/patches/$p.patch"
-          done
-      - name: Apply BoringSSL REALITY patch
+          python3 scripts/apply-kernel-patches.py upstream --profile "$KERNEL_PROFILE"
+      - name: Check REALITY hooks
+        if: env.KERNEL_PROFILE == 'tcp-reality'
         run: |
           test -d upstream/src/third_party/boringssl/src
-          git -C upstream apply --ignore-space-change --whitespace=nowarn --directory=src/third_party/boringssl/src "$GITHUB_WORKSPACE/patches/001-boringssl-reality.patch"
-          git -C upstream apply --ignore-space-change --whitespace=nowarn --directory=src/third_party/boringssl/src "$GITHUB_WORKSPACE/patches/011-quic-reality-boringssl.patch"
           test -f upstream/src/net/socket/reality_config.cc
           test -f upstream/src/third_party/boringssl/src/ssl/reality.cc
           grep -q -- '--reality-public-key' upstream/src/net/tools/naive/naive_proxy_bin.cc
-          grep -q -- 'SSL_set1_reality_config_quic' upstream/src/third_party/boringssl/src/include/openssl/ssl.h
-          grep -q -- 'ssl_reality_verify_quic_certificate' upstream/src/third_party/boringssl/src/ssl/tls13_client.cc
-          grep -q -- 'RealityQuicConfig' upstream/src/net/third_party/quiche/src/quiche/quic/core/quic_types.h
           git -C upstream diff --check
       - name: Cache toolchains (Linux)
         uses: actions/cache@v4
@@ -129,12 +132,16 @@ jobs:
           ./build.sh
           ccache -s && ccache --evict-older-than 1d
       - name: Verify REALITY patch is in the binary
+        if: env.KERNEL_PROFILE == 'tcp-reality'
         working-directory: upstream/src
         run: |
           file out/Release/naive
           # target_cpu=arm64 is a cross binary on the x64 runner, so
           # grep the flag string in the binary instead of executing it.
           grep -aq -- '--reality-public-key' out/Release/naive
+      - name: Verify native H3 configuration policy
+        if: env.KERNEL_PROFILE == 'native-h3' && matrix.arch == 'x64'
+        run: bash tests/native-h3-config.sh upstream/src/out/Release/naive
       - name: Basic test
         working-directory: upstream/src
         run: ../tests/basic.sh out/Release/naive
@@ -143,6 +150,9 @@ jobs:
         run: |
           mkdir ${{ env.BUNDLE }}
           cp out/Release/naive "$GITHUB_WORKSPACE/config.json" "$GITHUB_WORKSPACE/LICENSE" "$GITHUB_WORKSPACE/USAGE.txt" ${{ env.BUNDLE }}
+          if [[ "$KERNEL_PROFILE" == "tcp-reality" ]]; then
+            cp "$GITHUB_WORKSPACE/patches/tcp-reality-client.json.example" "${{ env.BUNDLE }}/config.json"
+          fi
           tar cJf ${{ env.BUNDLE }}.tar.xz ${{ env.BUNDLE }}
           openssl sha256 out/Release/naive >sha256sum.txt
           echo "SHA256SUM=$(cut -d' ' -f2 sha256sum.txt)" >>$GITHUB_ENV
@@ -171,7 +181,7 @@ jobs:
     runs-on: windows-2022
     env:
       EXTRA_FLAGS: 'target_cpu="x64"'
-      BUNDLE: naivereal-${{ github.event.release.tag_name || 'kernel' }}-${{ github.job }}-x64
+      BUNDLE: naivereal-${{ inputs.kernel_profile == 'tcp-reality' && 'tcp-reality-' || '' }}${{ github.event.release.tag_name || 'kernel' }}-${{ github.job }}-x64
     steps:
       - uses: actions/checkout@v4
       - name: Fetch upstream naiveproxy source
@@ -182,19 +192,14 @@ jobs:
           git -C upstream checkout FETCH_HEAD
           echo "upstream commit: $(git -C upstream rev-parse HEAD)"
           test "$(cat CHROMIUM_VERSION)" = "$(cat upstream/CHROMIUM_VERSION)"
-      - name: Apply REALITY patches
+      - name: Apply selected kernel profile
+        run: python3 scripts/apply-kernel-patches.py upstream --profile "$KERNEL_PROFILE"
+      - name: Check REALITY hooks
+        if: env.KERNEL_PROFILE == 'tcp-reality'
         run: |
-          for p in 002-net-reality-plumbing 003-spider-mode 004-net-build-registration 010-quic-hysteria2-bbr-tuning 012-quic-reality-net; do
-            git -C upstream apply --ignore-space-change --whitespace=nowarn --directory=src "$GITHUB_WORKSPACE/patches/$p.patch"
-          done
-          git -C upstream apply --ignore-space-change --whitespace=nowarn --directory=src/third_party/boringssl/src "$GITHUB_WORKSPACE/patches/001-boringssl-reality.patch"
-          git -C upstream apply --ignore-space-change --whitespace=nowarn --directory=src/third_party/boringssl/src "$GITHUB_WORKSPACE/patches/011-quic-reality-boringssl.patch"
           test -f upstream/src/net/socket/reality_config.cc
           test -f upstream/src/third_party/boringssl/src/ssl/reality.cc
           grep -q -- '--reality-public-key' upstream/src/net/tools/naive/naive_proxy_bin.cc
-          grep -q -- 'SSL_set1_reality_config_quic' upstream/src/third_party/boringssl/src/include/openssl/ssl.h
-          grep -q -- 'ssl_reality_verify_quic_certificate' upstream/src/third_party/boringssl/src/ssl/tls13_client.cc
-          grep -q -- 'RealityQuicConfig' upstream/src/net/third_party/quiche/src/quiche/quic/core/quic_types.h
       - name: Cache toolchains
         uses: actions/cache@v4
         with:
@@ -228,8 +233,12 @@ jobs:
           ./build.sh
           ~/.cargo/bin/sccache -s
       - name: Verify REALITY patch is in the binary
+        if: env.KERNEL_PROFILE == 'tcp-reality'
         working-directory: upstream/src
         run: grep -aq -- '--reality-public-key' out/Release/naive.exe
+      - name: Verify native H3 configuration policy
+        if: env.KERNEL_PROFILE == 'native-h3'
+        run: bash tests/native-h3-config.sh upstream/src/out/Release/naive.exe
       - name: Basic test
         working-directory: upstream/src
         run: ../tests/basic.sh out/Release/naive
@@ -239,6 +248,9 @@ jobs:
           mkdir ${{ env.BUNDLE }}
           cp out/Release/naive.exe ${{ env.BUNDLE }}/naive.exe
           cp "$GITHUB_WORKSPACE/config.json" "$GITHUB_WORKSPACE/LICENSE" "$GITHUB_WORKSPACE/USAGE.txt" ${{ env.BUNDLE }}
+          if [[ "$KERNEL_PROFILE" == "tcp-reality" ]]; then
+            cp "$GITHUB_WORKSPACE/patches/tcp-reality-client.json.example" "${{ env.BUNDLE }}/config.json"
+          fi
           7z a ${{ env.BUNDLE }}.zip ${{ env.BUNDLE }}
           openssl sha256 ${{ env.BUNDLE }}/naive.exe >sha256sum.txt
           echo "SHA256SUM=$(cut -d' ' -f2 sha256sum.txt)" >>$GITHUB_ENV
@@ -263,7 +275,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   reality-e2e:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.target != 'arm64' }}
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.target != 'arm64') && inputs.kernel_profile == 'tcp-reality' }}
     # REALITY full-chain test: patched kernel (client, reality flags) ->
     # naivereal-frontend (reality mode) -> official naive server -> internet.
     needs: linux
@@ -285,10 +297,9 @@ jobs:
       - name: REALITY full-chain e2e
         run: bash tests/ci-reality-e2e.sh /tmp/kernel
 
-  quic-reality-e2e:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.target != 'arm64' }}
-    # REALITY-over-QUIC full-chain test: patched kernel (quic:// + reality
-    # flags) -> h3frontend (mode=reality) -> official naive server.
+  native-h3-e2e:
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.target != 'arm64') && inputs.kernel_profile != 'tcp-reality' }}
+    # Standard-TLS QUIC client -> owned H3 origin -> local naive server.
     needs: linux
     runs-on: ubuntu-latest
     steps:
@@ -308,5 +319,7 @@ jobs:
       - name: Build h3frontend
         working-directory: h3frontend
         run: go build -o /tmp/naivereal-h3frontend .
-      - name: QUIC REALITY full-chain e2e
-        run: bash tests/quic-reality-e2e.sh /tmp/kernel
+      - name: Native H3 full-chain e2e (isolated CI runner only)
+        env:
+          NAIVEREAL_ALLOW_CI_TRUST_INSTALL: "1"
+        run: bash tests/native-h3-e2e.sh /tmp/kernel
