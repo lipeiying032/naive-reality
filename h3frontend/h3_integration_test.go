@@ -104,6 +104,7 @@ func TestH3ConnectRelayIntegration(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "h3frontend.toml")
 	cfg := fmt.Sprintf(`
+mode = "tls"
 listen = %q
 [tls]
 cert = %q

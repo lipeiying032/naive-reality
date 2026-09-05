@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -22,11 +24,22 @@ var log = slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 func main() {
 	path := "h3frontend.toml"
+	checkOnly := false
 	if len(os.Args) >= 2 {
 		switch os.Args[1] {
-		case "genkey":
-			runGenkey()
+		case "check":
+			if len(os.Args) != 3 {
+				fmt.Fprintln(os.Stderr, "usage: h3frontend check <config.toml>")
+				os.Exit(2)
+			}
+			path = os.Args[2]
+			checkOnly = true
+		case "-h", "--help":
+			fmt.Println("usage: h3frontend [config.toml] | check <config.toml>\nDefault: origin mode with an owned TLS certificate. See docs/h3-origin.md.")
 			return
+		case "genkey":
+			fmt.Fprintln(os.Stderr, "H3 now uses an owned TLS certificate; REALITY genkey is only available in the TCP frontend")
+			os.Exit(1)
 		default:
 			path = os.Args[1]
 		}
@@ -35,6 +48,14 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config:", err)
 		os.Exit(1)
+	}
+	if checkOnly {
+		if _, err := tls.LoadX509KeyPair(cfg.TLS.Cert, cfg.TLS.Key); err != nil {
+			fmt.Fprintln(os.Stderr, "certificate:", err)
+			os.Exit(1)
+		}
+		fmt.Println("configuration and TLS key pair are valid; no listeners started")
+		return
 	}
 	setLogLevel(cfg.LogLevel)
 
@@ -64,30 +85,21 @@ func setLogLevel(level string) {
 }
 
 func serve(ctx context.Context, cfg *Config) error {
-	var params *realityQUICParams
-	var tlsConf *tls.Config
-	var authSource *realityAuthSource
-	switch cfg.Mode {
-	case "reality":
-		var err error
-		params, err = buildRealityParams(cfg)
-		if err != nil {
-			return err
-		}
-		tlsConf, authSource, err = buildRealityTLSConfig(ctx, params)
-		if err != nil {
-			return err
-		}
-	default: // "tls"
-		cert, err := tls.LoadX509KeyPair(cfg.TLS.Cert, cfg.TLS.Key)
-		if err != nil {
-			return fmt.Errorf("load cert: %w", err)
-		}
-		tlsConf = http3.ConfigureTLSConfig(&tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS13,
-		})
+	// All listeners and accepted connections belong to this invocation, including
+	// when startup fails or one of the optional website listeners fails.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if cfg.Mode != "origin" && cfg.Mode != "tls" {
+		return fmt.Errorf("unsupported mode %q; use origin with an owned TLS certificate", cfg.Mode)
 	}
+	cert, err := tls.LoadX509KeyPair(cfg.TLS.Cert, cfg.TLS.Key)
+	if err != nil {
+		return fmt.Errorf("load cert: %w", err)
+	}
+	tlsConf := http3.ConfigureTLSConfig(&tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS13,
+	})
 
 	maxIdle, err := time.ParseDuration(cfg.QUIC.MaxIdleTimeout)
 	if err != nil {
@@ -124,21 +136,11 @@ func serve(ctx context.Context, cfg *Config) error {
 	if err != nil {
 		return fmt.Errorf("listen udp: %w", err)
 	}
-	// Match the Xray h3reality deployment: explicit 4MiB UDP socket buffers.
 	_ = udpConn.SetReadBuffer(4 << 20)
 	_ = udpConn.SetWriteBuffer(4 << 20)
+	defer udpConn.Close()
 
-	var conn net.PacketConn = udpConn
-	if cfg.Mode == "reality" {
-		conn, err = newRealityPrecheckPacketConn(ctx, udpConn, params, authSource)
-		if err != nil {
-			_ = udpConn.Close()
-			return fmt.Errorf("reality precheck: %w", err)
-		}
-	}
-	defer conn.Close()
-
-	transport := &quic.Transport{Conn: conn, DisableGSO: cfg.QUIC.DisableGSO}
+	transport := &quic.Transport{Conn: udpConn, DisableGSO: cfg.QUIC.DisableGSO}
 	defer transport.Close()
 	listener, err := transport.Listen(tlsConf, quicConf)
 	if err != nil {
@@ -151,22 +153,69 @@ func serve(ctx context.Context, cfg *Config) error {
 		upstream: cfg.Upstream.Addr,
 		dialer:   dialer,
 	}
-	if cfg.Mode == "reality" && cfg.Reality.DestServerName != "" {
-		handler.fallbackHost = cfg.Reality.DestServerName
-		handler.fallbackClient = newFallbackClient(&dialer, cfg.Reality.DestServerName)
+	var h3Handler http.Handler = handler
+	var website http.Handler
+	if cfg.Mode == "origin" {
+		origin, closeRoot, err := newOriginHandler(cfg.Origin, handler)
+		if err != nil {
+			return fmt.Errorf("open origin website: %w", err)
+		}
+		defer closeRoot()
+		h3Handler = origin
+		website = origin.website
 	}
-	h3srv := &http3.Server{Handler: handler}
+	h3srv := &http3.Server{Handler: h3Handler}
+	defer h3srv.Close()
+
+	// The optional TCP listener serves the same website and advertises this UDP
+	// endpoint. It uses the same certificate, but only H3 carries proxy CONNECT.
+	// No listener or certificate selection depends on proxy credentials.
+	websiteErr := make(chan error, 1)
+	if website != nil && cfg.Origin.TCPListen != "" {
+		ln, err := net.Listen("tcp", cfg.Origin.TCPListen)
+		if err != nil {
+			return fmt.Errorf("origin tcp listen: %w", err)
+		}
+		defer ln.Close()
+		altSvc := fmt.Sprintf(`h3=":%d"; ma=86400`, udpConn.LocalAddr().(*net.UDPAddr).Port)
+		websrv := &http.Server{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Alt-Svc", altSvc)
+				website.ServeHTTP(w, r)
+			}),
+			TLSConfig: &tls.Config{
+				Certificates: tlsConf.Certificates,
+				MinVersion:   tls.VersionTLS13,
+			},
+			ReadHeaderTimeout: 10 * time.Second,
+			IdleTimeout:       maxIdle,
+		}
+		defer websrv.Close()
+		go func() {
+			err := websrv.ServeTLS(ln, "", "")
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				websiteErr <- err
+				cancel()
+			}
+		}()
+		log.Info("origin website listening", "addr", ln.Addr())
+	}
 
 	go func() {
 		<-ctx.Done()
 		_ = listener.Close()
-		_ = conn.Close()
+		_ = udpConn.Close()
 	}()
 
 	log.Info("listening", "addr", udpConn.LocalAddr(), "mode", cfg.Mode, "congestion", cfg.Congestion.Type, "bbr_profile", cfg.Congestion.BBRProfile)
 	for {
 		conn, err := listener.Accept(ctx)
 		if err != nil {
+			select {
+			case err := <-websiteErr:
+				return fmt.Errorf("origin website: %w", err)
+			default:
+			}
 			if ctx.Err() != nil {
 				return nil
 			}
@@ -183,6 +232,7 @@ func serve(ctx context.Context, cfg *Config) error {
 		acceptedAt := time.Now()
 		log.Debug("quic conn accepted", "remote", remote)
 		go func() {
+			defer conn.CloseWithError(0, "")
 			err := h3srv.ServeQUICConn(conn)
 			if err != nil {
 				log.Warn("quic conn closed with error", "remote", remote, "duration", time.Since(acceptedAt), "err", err)

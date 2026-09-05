@@ -1,18 +1,30 @@
 # naivereal
 
-在官方 [naiveproxy](https://github.com/klzgrad/naiveproxy) 内核(C++/Chromium)基础上, 于 TCP 传输层增加 [REALITY](https://github.com/XTLS/REALITY)(Xray 现行机制) 的代理套件.
+基于官方 [naiveproxy](https://github.com/klzgrad/naiveproxy) 的代理套件。当前默认采用自有域名/证书的标准 TLS 和 H3，客户端保持上游 Chromium QUICHE/BoringSSL 网络栈。TCP REALITY 作为显式选择的兼容构建保留。
+
+**QUIC REALITY 已移除。** 旧配置会明确拒绝，不能直接替换旧客户端/服务端；迁移与验证见 [H3 自有站点模式](docs/h3-origin.md)。
 
 ## 组件
 
 | 组件 | 目录 | 说明 |
 |---|---|---|
 | 服务端 REALITY 前端 | frontend/ | Go; 复用 Xray 的 xtls/reality 服务端 fork, 终结 REALITY TLS/h2, 以 HTTP/1.1 CONNECT 转发给官方 naive 服务端; 也支持普通 TLS 模式(等价 Caddy) |
-| H3 frontend | h3frontend/ | 独立 QUIC/HTTP3 CONNECT 前端; 支持标准 TLS 模式与 REALITY-over-QUIC 模式(mode="reality", C-gamma: 预检 + 每连接服务端证明 + 中继); 由 release-components 工作流自动发布 |
+| H3 frontend | h3frontend/ | 默认 origin 模式：自有网站与逐请求认证的 CONNECT 共用标准 H3/TLS 端点；可选 TCP HTTPS 网站/Alt-Svc |
 | 服务端 naive 内核 | (上游) | 官方 naiveproxy 服务端二进制(不做任何改动, CI 按 CHROMIUM_VERSION 从上游拉取) |
-| 客户端内核 | patches/ | 官方 naiveproxy 客户端 + REALITY 补丁(BoringSSL); CI 克隆上游源码后应用 patches/001-004 + 010-012 构建, 单一 exe, 保持官方 config.json 契约, 可替换 v2rayN 目录内的 naiveproxy 内核 |
+| 客户端内核 | patches/ | 默认 native-h3 仅应用配置拒绝补丁 005，不修改网络栈；可选 tcp-reality 使用 001–004、006 |
 | Windows TUI 客户端 | tui/ | Go/bubbletea; 档案管理, 统计, 系统代理, TUN 模式(wintun + gVisor), 分享链接导入导出 |
 
-## 架构
+## 默认 H3 架构
+
+```
+原生 Chromium 客户端 -> 标准 QUIC/TLS -> H3 frontend（自有证书）
+                                         ├─ GET/HEAD：自有网站
+                                         └─ 每请求认证 CONNECT -> 本地 naive 上游
+```
+
+服务端共用同一 QUIC/TLS 栈，无 Initial 认证预检、第三方 target relay 或自定义握手 proof。Go 服务端不等同于 Chromium 服务端，也不宣称与任意第三方网站不可区分。
+
+## 可选 TCP REALITY 架构
 
 ```
 [浏览器] -> 本地 SOCKS5/HTTP -> [客户端内核: 官方 naive + REALITY 补丁]
@@ -23,9 +35,20 @@
 (naive padding 帧端到端透明).
 ```
 
-## 快速开始
+## H3 配置
 
-服务端(Linux):
+使用 [服务端示例](h3frontend/origin.toml.example) 和根目录 `config.json`，填写自有域名、证书/私钥、公开网站目录及与本地 naive 上游相同的用户名/密码。默认内核不接受 REALITY 参数。
+
+```sh
+cd h3frontend && go build -o /tmp/naivereal-h3frontend .
+/tmp/naivereal-h3frontend check /path/to/h3frontend.toml
+```
+
+配置检查不启动监听器。迁移工具、运行方式和 TCP 网站入口见 [H3 文档](docs/h3-origin.md)。
+
+## 可选 TCP REALITY 配置
+
+以下命令仅对应 TCP 前端；客户端需显式选择 tcp-reality 构建。服务端(Linux):
 
 ```sh
 ./naivereal-frontend genkey                       # 生成 REALITY X25519 密钥对
@@ -42,8 +65,8 @@ Windows: 见 docs/windows.md; v2rayN 内核替换见 docs/v2rayN.md.
 - tui: 已拆分到独立仓库 [naivereal-tui](https://github.com/lipeiying032/naivereal-tui); `cd tui && go build ./...` (TUN 依赖 gvisor/wireguard-go 较大, 首次构建需下载)
 - 客户端内核(C++): 推送 GitHub 后由 .github/workflows/build-kernel.yml 自动构建
   (linux x64/arm64 + windows x64): CI 克隆 klzgrad/naiveproxy(按 CHROMIUM_VERSION 校验)
-  并应用 patches/001-004; 本地构建同样 = 克隆上游 + 应用补丁 + 官方 get-clang.sh/build.sh.
-- 补丁: patches/001-004(boringssl + net 接线 + 蜘蛛模式 + 构建注册), 均已 git apply --check 验证.
+  默认应用 005；手动选择 tcp-reality 时应用 001–004、006。补丁入口为 scripts/apply-kernel-patches.py，后续使用官方 get-clang.sh/build.sh.
+- H3: cd h3frontend && go test -race ./... && go build ./...；迁移测试: python3 tests/test_h3_migration.py -v。
 - 测试: cd frontend && go test ./...; cd tui && go test ./...
 
 ## 自动发布

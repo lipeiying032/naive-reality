@@ -1,18 +1,12 @@
-# 项目状态
+# 当前 H3 状态
 
-更新时间: 2026-08-18.
+H3 已迁移到自有域名/证书的标准 TLS 路线。默认客户端 profile 为 `native-h3`，默认服务端模式为 `origin`。旧 QUIC REALITY 已移除，配置会明确拒绝。实现和迁移见 [h3-origin.md](h3-origin.md)。
 
-## 最新进展: QUIC REALITY(分支 agent/h3-reality-quic)
+TCP REALITY 前端独立保留；需要该协议时须显式构建 `tcp-reality` 客户端。C++ 补丁应用检查不等于编译通过；本次实际验证记录见研究目录 ROOTFIX-RESULTS.md。
 
-- h3frontend 新增 `mode = "reality"`: C-gamma REALITY-over-QUIC 服务端
-  (配置 `[reality]` 块、`genkey`、dest 证书链 + 一次性密钥、QUIC Initial 预检 +
-  SNI 感知 UDP relay、`ClientHelloVerifier` random 字段认证)。
-- 客户端内核新增 patches/011(QUIC BoringSSL: random 字段认证 + 跳过
-  CertificateVerify + `SSL_set1_reality_config_quic`)与 patches/012(net/quiche:
-  `QuicSSLConfig.reality`、SNI 覆盖、ProofVerifier 旁路)。
-- CI: build-kernel 应用 011/012, 新增 `quic-reality-e2e` 任务。
-- TUI(naivereal-tui, 分支 agent/quic-reality): 支持 `quic://` 与
-  `naivereal+quic://` 分享链接, coremgr 生成 `proxy=quic://` 并携带 reality 块。
+## 历史记录（截至 2026-08-18）
+
+以下保留原有 TCP/TUI 开发记录，不代表本次改动已跑过这些测试或已发布。
 
 ## 已完成
 

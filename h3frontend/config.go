@@ -1,8 +1,6 @@
 package main
 
 import (
-	"encoding/base64"
-	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -20,31 +18,26 @@ const (
 type Config struct {
 	LogLevel   string           `toml:"log_level"`
 	Listen     string           `toml:"listen"`
-	Mode       string           `toml:"mode"` // "tls" (default) | "reality"
+	Mode       string           `toml:"mode"` // "origin" (default) | "tls" (explicit CONNECT-only compatibility)
 	TLS        TLSConfig        `toml:"tls"`
-	Reality    RealityConfig    `toml:"reality"`
+	Origin     OriginConfig     `toml:"origin"`
 	QUIC       QUICConfig       `toml:"quic"`
 	Congestion CongestionConfig `toml:"congestion"`
 	Upstream   UpstreamConfig   `toml:"upstream"`
 }
 
-// RealityConfig mirrors the frontend's inbound.reality block for the QUIC
-// REALITY-over-QUIC (C-gamma) mode.
-type RealityConfig struct {
-	PrivateKey      string   `toml:"private_key"`
-	ShortIDs        []string `toml:"short_ids"`
-	ServerNames     []string `toml:"server_names"`
-	Dest            string   `toml:"dest"`
-	DestServerName  string   `toml:"dest_server_name"`
-	H3Cert          string   `toml:"h3_cert"`
-	H3Key           string   `toml:"h3_key"`
-	MaxTimeDiff     int64    `toml:"max_time_diff"` // milliseconds; 0 = disabled
-	FallbackTimeout string   `toml:"fallback_timeout"`
-}
-
 type TLSConfig struct {
 	Cert string `toml:"cert"`
 	Key  string `toml:"key"`
+}
+
+// OriginConfig serves an operator-owned website and authenticates each CONNECT
+// request inside standard TLS. It does not use REALITY credentials or a target.
+type OriginConfig struct {
+	WebRoot   string `toml:"web_root"`
+	Username  string `toml:"username"`
+	Password  string `toml:"password"`
+	TCPListen string `toml:"tcp_listen"` // optional HTTPS website / Alt-Svc listener
 }
 
 type QUICConfig struct {
@@ -78,6 +71,13 @@ func loadConfig(path string) (*Config, error) {
 	if err := toml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+	var sections map[string]any
+	if err := toml.Unmarshal(data, &sections); err != nil {
+		return nil, fmt.Errorf("parse config sections: %w", err)
+	}
+	if _, ok := sections["reality"]; ok {
+		return nil, fmt.Errorf("REALITY-over-QUIC has been removed; migrate with scripts/migrate-h3-config.py and an owned TLS certificate")
+	}
 	if err := cfg.validateAndFill(); err != nil {
 		return nil, err
 	}
@@ -101,15 +101,17 @@ func (c *Config) validateAndFill() error {
 	}
 	switch c.Mode {
 	case "":
-		c.Mode = "tls"
-	case "tls", "reality":
+		c.Mode = "origin"
+	case "tls", "origin":
+	case "reality":
+		return fmt.Errorf("REALITY-over-QUIC has been removed; use mode=origin with an owned TLS certificate (see docs/h3-origin.md)")
 	default:
-		return fmt.Errorf("mode %q: must be \"tls\" or \"reality\"", c.Mode)
+		return fmt.Errorf("mode %q: must be \"origin\" or \"tls\"", c.Mode)
 	}
 	switch c.Mode {
-	case "tls":
+	case "tls", "origin":
 		if c.TLS.Cert == "" || c.TLS.Key == "" {
-			return fmt.Errorf("tls.cert and tls.key are required in tls mode")
+			return fmt.Errorf("tls.cert and tls.key are required in %s mode", c.Mode)
 		}
 		if _, err := os.Stat(c.TLS.Cert); err != nil {
 			return fmt.Errorf("tls.cert: %w", err)
@@ -117,58 +119,12 @@ func (c *Config) validateAndFill() error {
 		if _, err := os.Stat(c.TLS.Key); err != nil {
 			return fmt.Errorf("tls.key: %w", err)
 		}
-	case "reality":
-		if c.Reality.PrivateKey == "" {
-			return fmt.Errorf("reality.private_key is required in reality mode")
-		}
-		if _, err := parseRealityPrivateKey(c.Reality.PrivateKey); err != nil {
-			return err
-		}
-		if len(c.Reality.ShortIDs) == 0 {
-			return fmt.Errorf("reality.short_ids must contain at least one ID")
-		}
-		if _, err := parseShortIDs(c.Reality.ShortIDs); err != nil {
-			return err
-		}
-		if len(c.Reality.ServerNames) == 0 {
-			return fmt.Errorf("reality.server_names must contain at least one SNI")
-		}
-		for i, name := range c.Reality.ServerNames {
-			name = strings.TrimSpace(name)
-			if name == "" {
-				return fmt.Errorf("reality.server_names[%d] must not be empty", i)
-			}
-			c.Reality.ServerNames[i] = name
-		}
-		if c.Reality.Dest == "" {
-			return fmt.Errorf("reality.dest is required in reality mode")
-		}
-		if _, _, err := net.SplitHostPort(c.Reality.Dest); err != nil {
-			return fmt.Errorf("reality.dest %q: %w", c.Reality.Dest, err)
-		}
-		if c.Reality.DestServerName == "" {
-			c.Reality.DestServerName = c.Reality.ServerNames[0]
-		}
-		if c.Reality.MaxTimeDiff < 0 {
-			return fmt.Errorf("reality.max_time_diff must not be negative")
-		}
-		if c.Reality.FallbackTimeout == "" {
-			c.Reality.FallbackTimeout = "120s"
-		}
-		if _, err := time.ParseDuration(c.Reality.FallbackTimeout); err != nil {
-			return fmt.Errorf("reality.fallback_timeout: %w", err)
-		}
-		if (c.Reality.H3Cert == "") != (c.Reality.H3Key == "") {
-			return fmt.Errorf("reality.h3_cert and reality.h3_key must be set together")
-		}
-		if c.Reality.H3Cert != "" {
-			if _, err := os.Stat(c.Reality.H3Cert); err != nil {
-				return fmt.Errorf("reality.h3_cert: %w", err)
-			}
-			if _, err := os.Stat(c.Reality.H3Key); err != nil {
-				return fmt.Errorf("reality.h3_key: %w", err)
+		if c.Mode == "origin" {
+			if err := c.Origin.validate(); err != nil {
+				return err
 			}
 		}
+
 	}
 	if c.Upstream.Addr == "" {
 		c.Upstream.Addr = "127.0.0.1:18080"
@@ -234,32 +190,27 @@ func (c *Config) validateAndFill() error {
 	return nil
 }
 
-// parseRealityPrivateKey decodes the base64url-encoded 32-byte X25519 private key.
-func parseRealityPrivateKey(s string) ([]byte, error) {
-	b, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(s))
+func (c *OriginConfig) validate() error {
+	if c.Username == "" || c.Password == "" {
+		return fmt.Errorf("origin.username and origin.password are required")
+	}
+	if strings.ContainsAny(c.Username, ":\r\n") || strings.ContainsAny(c.Password, "\r\n") {
+		return fmt.Errorf("origin credentials contain invalid HTTP Basic characters")
+	}
+	if c.WebRoot == "" {
+		return fmt.Errorf("origin.web_root is required")
+	}
+	info, err := os.Stat(c.WebRoot)
 	if err != nil {
-		return nil, fmt.Errorf("reality.private_key: expect base64url: %w", err)
+		return fmt.Errorf("origin.web_root: %w", err)
 	}
-	if len(b) != 32 {
-		return nil, fmt.Errorf("reality.private_key: got %d bytes, want 32", len(b))
+	if !info.IsDir() {
+		return fmt.Errorf("origin.web_root must be a directory")
 	}
-	return b, nil
-}
-
-// parseShortIDs converts a list of hex short IDs (<=16 hex chars each, "" allowed)
-// into the fixed 8-byte, right-zero-padded set used by REALITY.
-func parseShortIDs(list []string) (map[[8]byte]bool, error) {
-	m := make(map[[8]byte]bool, len(list))
-	for _, s := range list {
-		var id [8]byte
-		if s != "" {
-			b, err := hex.DecodeString(strings.TrimSpace(s))
-			if err != nil || len(b) > 8 {
-				return nil, fmt.Errorf("reality.short_ids: %q must be hex with at most 16 characters", s)
-			}
-			copy(id[:], b) // left aligned, right zero padded (matches Xray)
+	if c.TCPListen != "" {
+		if _, _, err := net.SplitHostPort(c.TCPListen); err != nil {
+			return fmt.Errorf("origin.tcp_listen: %w", err)
 		}
-		m[id] = true
 	}
-	return m, nil
+	return nil
 }

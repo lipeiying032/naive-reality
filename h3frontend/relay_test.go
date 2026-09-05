@@ -1,9 +1,7 @@
 package main
 
 import (
-	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -25,39 +23,6 @@ func TestBuildH1Connect(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(req), "connection") {
 		t.Fatal("hop-by-hop header leaked")
-	}
-}
-
-func TestRelayFallbackProxiesNonConnectRequests(t *testing.T) {
-	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/status" || r.URL.RawQuery != "q=1" {
-			t.Errorf("unexpected destination request: %s", r.URL)
-		}
-		if got := r.Header.Get("Proxy-Authorization"); got != "" {
-			t.Errorf("proxy authorization leaked to destination")
-		}
-		w.Header().Set("X-Test", "yes")
-		_, _ = io.WriteString(w, "destination response")
-	}))
-	defer origin.Close()
-
-	handler := &relayHandler{
-		fallbackHost:   origin.Listener.Addr().String(),
-		fallbackClient: origin.Client(),
-	}
-	req := httptest.NewRequest(http.MethodGet, "https://naivereal.test/status?q=1", nil)
-	req.Header.Set("Proxy-Authorization", "Basic should-not-forward")
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
-	}
-	if rec.Header().Get("X-Test") != "yes" {
-		t.Fatalf("destination headers missing: %v", rec.Header())
-	}
-	if rec.Body.String() != "destination response" {
-		t.Fatalf("body = %q", rec.Body.String())
 	}
 }
 

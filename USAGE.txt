@@ -1,3 +1,10 @@
+Default kernel profile: native-h3 (standard TLS).
+Use config.json with quic://user:password@your-owned-domain:port.
+REALITY and custom QUIC options are rejected by the default kernel.
+Migration and server configuration: docs/h3-origin.md.
+TCP REALITY requires the explicitly selected tcp-reality build profile.
+The historical notes below apply only to that optional TCP profile.
+
 naivereal kernel: official naiveproxy + REALITY (BoringSSL patches)
 
 Usage:
