@@ -2,7 +2,7 @@
 """Apply one explicit kernel profile to the pinned, clean upstream checkout.
 
 Both CI and local builds use the manifest. The native-h3 profile changes only
-configuration rejection; QUICHE, BoringSSL, and net's QUIC plumbing stay upstream.
+application configuration; QUICHE, BoringSSL, and net's QUIC plumbing stay upstream.
 This script never fetches, commits, builds, publishes, or resets a checkout.
 """
 
@@ -57,9 +57,12 @@ def main():
         # fails if future edits accidentally pull a transport patch into here.
         changed = set(git(tree, "diff", "--name-only", "HEAD", capture_output=True).stdout.splitlines())
         changed.update(git(tree, "ls-files", "--others", "--exclude-standard", capture_output=True).stdout.splitlines())
-        if changed != {"src/net/tools/naive/naive_config.cc"}:
+        if changed != {
+            "src/net/tools/naive/naive_config.cc",
+            "src/net/tools/naive/naive_proxy_bin.cc",
+        }:
             raise RuntimeError(f"native-h3 changed unexpected files: {sorted(changed)}")
-        print("Verified: only naive_config.cc differs; network stack unchanged")
+        print("Verified: only naive application configuration differs; network stack unchanged")
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@
 | 服务端 REALITY 前端 | frontend/ | Go; 复用 Xray 的 xtls/reality 服务端 fork, 终结 REALITY TLS/h2, 以 HTTP/1.1 CONNECT 转发给官方 naive 服务端; 也支持普通 TLS 模式(等价 Caddy) |
 | H3 frontend | h3frontend/ | 默认 origin 模式：自有网站与逐请求认证的 CONNECT 共用标准 H3/TLS 端点；可选 TCP HTTPS 网站/Alt-Svc |
 | 服务端 naive 内核 | (上游) | 官方 naiveproxy 服务端二进制(不做任何改动, CI 按 CHROMIUM_VERSION 从上游拉取) |
-| 客户端内核 | patches/ | 默认 native-h3 仅应用配置拒绝补丁 005，不修改网络栈；可选 tcp-reality 使用 001–004、006 |
+| 客户端内核 | patches/ | 默认 native-h3 应用配置拒绝补丁 005 和配置初始化修复 007，不修改网络栈；可选 tcp-reality 使用 001–004、006 |
 | Windows TUI 客户端 | tui/ | Go/bubbletea; 档案管理, 统计, 系统代理, TUN 模式(wintun + gVisor), 分享链接导入导出 |
 
 ## 默认 H3 架构
@@ -65,7 +65,7 @@ Windows: 见 docs/windows.md; v2rayN 内核替换见 docs/v2rayN.md.
 - tui: 已拆分到独立仓库 [naivereal-tui](https://github.com/lipeiying032/naivereal-tui); `cd tui && go build ./...` (TUN 依赖 gvisor/wireguard-go 较大, 首次构建需下载)
 - 客户端内核(C++): 推送 GitHub 后由 .github/workflows/build-kernel.yml 自动构建
   (linux x64/arm64 + windows x64): CI 克隆 klzgrad/naiveproxy(按 CHROMIUM_VERSION 校验)
-  默认应用 005；手动选择 tcp-reality 时应用 001–004、006。补丁入口为 scripts/apply-kernel-patches.py，后续使用官方 get-clang.sh/build.sh.
+  默认应用 005、007；手动选择 tcp-reality 时应用 001–004、006。补丁入口为 scripts/apply-kernel-patches.py，后续使用官方 get-clang.sh/build.sh.
 - H3: cd h3frontend && go test -race ./... && go build ./...；迁移测试: python3 tests/test_h3_migration.py -v。
 - 测试: cd frontend && go test ./...; cd tui && go test ./...
 

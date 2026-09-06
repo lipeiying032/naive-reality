@@ -1,6 +1,6 @@
 {
   "name": "naive-reality-client",
-  "description": "Native H3 by default: upstream Chromium networking with config rejection only. TCP REALITY is a separate opt-in profile.",
+  "description": "Native H3 by default: upstream Chromium networking with config rejection and initialization fixes. TCP REALITY is a separate opt-in profile.",
   "wire_format": "native-h3: standard TLS 1.3 and HTTP/3 CONNECT. tcp-reality: existing Xray TCP REALITY wire format.",
   "patches": [
     {
@@ -53,20 +53,28 @@
       "target": "naiveproxy src tree",
       "apply_with": "after 002/003/004",
       "description": "Reject QUIC REALITY and retired QUIC tuning options in the optional TCP REALITY build."
+    },
+    {
+      "file": "007-native-h3-context.patch",
+      "directory": "src",
+      "target": "naiveproxy src tree",
+      "apply_with": "scripts/apply-kernel-patches.py --profile native-h3",
+      "description": "Initialize existing QUIC proxy options before QuicSessionPool copies them, preserving Chromium's certificate verification for locally trusted roots."
     }
   ],
   "build_notes": [
     "001 edits build.json (authoritative source list) and the generated gen/sources.{gni,cmake,bzl,mk}. If the CI regenerates from build.json (go run ./util/pregenerate), the generated-file edits are redundant but harmless.",
     "Chromium consumes boringssl via third_party/boringssl/BUILD.gn, which imports gen/sources.gni and references ssl_sources / ssl_internal_headers. That BUILD.gn is NOT in the naiveproxy git tree; no edit is needed there because the new files are added to the lists it already imports.",
     "002/003 add net/socket/reality_config.{h,cc}; 004 registers them in src/net/BUILD.gn (verified: upstream naiveproxy has no net/socket/BUILD.gn; socket sources are listed flat in net/BUILD.gn around line 1015).",
-    "Native H3 applies only 005; TCP REALITY applies 001-004 and 006. Never combine 005 with the TCP REALITY patches. Retired 010/011/012 are available only in git history."
+    "Native H3 applies 005 and 007; TCP REALITY applies 001-004 and 006. Never combine native-h3 patches with the TCP REALITY patches. Retired 010/011/012 are available only in git history."
   ],
   "upstream_commit": "3ba967e2d36cc133a896e81a36257ad4c6ea20f4",
   "profiles": {
     "native-h3": {
       "description": "Standard TLS with an operator-owned certificate. No REALITY, QUIC tuning, BoringSSL, or QUICHE patches.",
       "patches": [
-        "005-native-h3-config.patch"
+        "005-native-h3-config.patch",
+        "007-native-h3-context.patch"
       ]
     },
     "tcp-reality": {
