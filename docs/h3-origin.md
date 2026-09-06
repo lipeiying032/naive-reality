@@ -55,7 +55,7 @@ python3 scripts/migrate-h3-config.py \
 
 ## 构建与兼容边界
 
-默认构建 profile 为 `native-h3`：只应用 `005-native-h3-config.patch`。该补丁只拒绝不兼容配置，不修改 QUICHE、BoringSSL、Transport Parameters、Initial 打包、ACK、拥塞控制或 H3 编码。
+默认构建 profile 为 `native-h3`：应用 `005-native-h3-config.patch` 拒绝不兼容配置，应用 `007-native-h3-context.patch` 在 Chromium 创建会话池之前设置已有 QUIC 代理配置。两者不修改 QUICHE、BoringSSL、Transport Parameters、Initial 打包、ACK、拥塞控制或 H3 编码。
 
 ```sh
 python3 scripts/apply-kernel-patches.py /path/to/clean-pinned-upstream
@@ -63,7 +63,7 @@ python3 scripts/apply-kernel-patches.py /path/to/clean-pinned-upstream
 python3 scripts/apply-kernel-patches.py /path/to/another-checkout --profile tcp-reality
 ```
 
-工具验证 CI 固定的上游 commit、Chromium 版本、工作树干净状态和补丁应用结果。`native-h3` 的修改文件集合必须仅有 `src/net/tools/naive/naive_config.cc`。后续编译仍使用上游 `src/get-clang.sh` 和 `src/build.sh`（目标 `naive`），没有新增 C++ H3 服务端。
+工具验证 CI 固定的上游 commit、Chromium 版本、工作树干净状态和补丁应用结果。`native-h3` 的修改文件集合限定为 `src/net/tools/naive/naive_config.cc` 和 `naive_proxy_bin.cc`。后续编译仍使用上游 `src/get-clang.sh` 和 `src/build.sh`（目标 `naive`），没有新增 C++ H3 服务端。
 
 TCP REALITY 是独立的兼容 profile，应用 001–004 和 006；它拒绝 QUIC+REALITY。其安全特性不能套用本次 H3 的结论。010/011/012 不再参与任何构建，历史实现保留在 git 历史中。
 
@@ -71,6 +71,6 @@ TCP REALITY 是独立的兼容 profile，应用 001–004 和 006；它拒绝 QU
 
 本地 Go 集成测试覆盖受信任证书、错误域名/不受信任证书、H3 网站和 CONNECT、每请求授权隔离、同一源 UDP socket 上的多连接隔离，以及 TCP HTTPS/Alt-Svc。迁移工具有不覆盖、凭据一致性和输入拒绝测试。
 
-CI 增加构建后的客户端配置拒绝测试、仅访问回环地址的 Chromium → H3 → naive 全链路测试。全链路脚本只能在明确允许临时 CA 安装的隔离 GitHub Actions runner 上运行；不能把脚本存在当作测试已通过。实际本次执行结果见研究目录中的 ROOTFIX-RESULTS.md。
+CI 增加构建后的客户端配置拒绝测试、仅访问回环地址的 Chromium → H3 → naive 全链路测试，以及 Chromium 对错误域名和未信任 CA 的拒绝测试。全链路脚本只能在明确允许临时 CA 安装的隔离 GitHub Actions runner 上运行；不能把脚本存在当作测试已通过。PR #17 的失败原因与验证方法见 [native H3 e2e 诊断](native-h3-e2e.md)。
 
 标准 TLS 修复的是认证边界与握手正确性。服务器仍可被识别为其实际 Go QUIC 栈；连接持续时间、吞吐、HTTP CONNECT 与普通网页用途、naiveproxy 自身的代理参数也可能形成统计差异。服务器 0-RTT 仍关闭，证书从文件在启动时加载、尚无自动续期/热加载。这些限制没有被描述为“绝对不可识别”。
