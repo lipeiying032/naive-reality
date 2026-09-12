@@ -1,9 +1,10 @@
 # Native H3 server spike (stage N0) — measurement report
 
-Status: **complete.** The native server builds from the pinned QUICHE revision,
-serves the website over HTTP/3, terminates naive CONNECT tunnels with byte-exact
-bidirectional payload, holds the probe-resistance invariants, and its
-transport-parameter fingerprint is measurably QUICHE's rather than quic-go's.
+Status: **complete, including the real client.** The native server builds from
+the pinned QUICHE revision, serves the website over HTTP/3, terminates naive
+CONNECT tunnels, and moves a 50 MB payload byte-exact through the **real naive
+kernel** (a `native-h3` build). Its transport-parameter fingerprint is measurably
+QUICHE's rather than quic-go's.
 
 ## 0. Headline
 
@@ -220,24 +221,76 @@ credentials.
 but it does not cover the client's actual request sequence. Auth handshakes,
 retry behaviour and error surfacing only appear when the real binary runs.
 
-## 6.4 The real-kernel test is blocked on the kernel profile
+## 6.4 The real-kernel gate: passed
 
-The remaining gate — naive kernel against the native server — could not be
-completed, and the reason is a mismatch in the released artifact rather than a
-problem with the server.
+The end-to-end gate now passes against the **real naive kernel**, not just the
+protocol-level client:
 
-`naivereal-kernel-linux-x64.tar.xz` from release 1.3.2 was downloaded and run.
-It **fails identically against the Go `h3frontend`**, which is how the mismatch
-was identified: it is the `tcp-reality` profile build (its `--help` advertises
-`--reality-server-name`, a flag the `native-h3` profile rejects by design), so it
-cannot drive a `quic://` proxy against either server. Both servers answer its
-preamble GET — the Go frontend and the native server each logged and served it —
-and the client then reports `ERR_QUIC_PROTOCOL_ERROR` in both cases.
+```
+[INFO] Preamble https://127.0.0.1:8444/
+[INFO] Connection 0 to 127.0.0.1:18081 via QUIC 127.0.0.1:8444
+[INFO] quic://127.0.0.1:8444 negotiated padding type: Variant1
+[INFO] Connection 0 closed: OK
 
-So this is not evidence against the native server. It does mean the end-to-end
-gate needs a `native-h3` binary, which must be built: roughly 1.5-2 hours of
-Chromium compilation, and the build host here has 1 vCPU / 2 GB. That is the
-next step, not a finding.
+$ curl --socks5-hostname ... http://.../big.bin
+code=200 size=50000000
+50 MB via naive kernel -> native QUICHE server: BYTE-EXACT
+```
+
+`negotiated padding type: Variant1` is the kernel confirming that it accepted the
+server's padding negotiation and will use the naive padding frame — i.e. the
+padding implementation interoperates with the real client, not only with our own
+test client.
+
+### Getting there: the release artifact was the wrong profile
+
+`naivereal-kernel-linux-x64.tar.xz` from release **1.3.2** is the `tcp-reality`
+profile (its `--help` advertises `--reality-server-name`, which `native-h3`
+rejects by design). It fails identically against the Go frontend, which is how
+the mismatch was identified — not evidence against the native server.
+
+The working binary came from **CI artifact `kernel-x64` of run 34017096766**,
+whose `kernel_profile` input defaulted to `native-h3`. That artifact was still
+unexpired. **Worth fixing upstream: the release should publish both profiles, or
+name them explicitly**, so the correct kernel does not depend on an unexpired CI
+artifact.
+
+## 6.5 A real bug the bulk transfer exposed: 16-bit frame-length overflow
+
+The protocol-level test passed because its payloads were tiny. Pushing a real
+file through found a corruption bug immediately:
+
+```
+code=200 size=50000000        <- the right NUMBER of bytes
+origin sha256: 840a8201c4169cf1b223010f62714497...
+via    sha256: 5ee42afbe6470777f71bc39ecd52e644...   <- wrong CONTENT
+```
+
+The first differing byte was at offset 15928 and everything after it was
+shifted: a whole chunk had gone missing.
+
+Cause: the tunnel's read chunk was **exactly 65536 bytes**, and the naive padding
+frame stores the payload length in a `uint16`. 65536 encodes as **0**, so the peer
+read a zero-length payload, treated the real 64 KiB as padding, and discarded it.
+Everything after that was offset by one chunk.
+
+Fixed by keeping reads strictly below 65536 (`kReadChunkSize = 65535`) and by
+clamping the encoded length in `NaivePaddingFramer::AddPadding` so the header can
+never alias to zero. The 50 MB transfer is byte-exact afterwards.
+
+**The lesson mirrors §6.3**: a test whose payloads never cross a frame boundary
+cannot find a frame-boundary bug. Both of the last two real bugs were invisible to
+the synthetic client and appeared within minutes of running real data.
+
+## 6.6 A crash the bulk transfer also exposed
+
+`StatusOr<QuicheMemSlice>` aborted with *"An OK status is not a valid constructor
+argument to StatusOr<T>"* (`absl/status/statusor.cc:79`). `QuicheMemSlice` is
+move-only with several converting constructors, so `return <temporary>` is
+ambiguous enough that absl can select the `Status` constructor.
+
+Fixed by constructing into the `StatusOr` explicitly with `absl::in_place`. The
+server now survives repeated transfers and a full 50 MB run.
 
 ## 7. What the spike establishes
 
@@ -248,7 +301,8 @@ next step, not a finding.
 | Does it fix the client half? | Nothing to fix: the client is already byte-identical to Chrome. |
 | Does it fix throughput? | **No, and it cannot.** See §8. |
 | Does the tunnel work? | **Yes against a protocol-level client** — CONNECT, per-request auth including the 407 retry sequence, padding negotiation in both directions, byte-exact payload (§6, §6.3). |
-| Does it work against the real naive kernel? | **Not yet tested.** The released kernel binary is the `tcp-reality` profile and fails against the Go frontend too (§6.4). A `native-h3` build is required. |
+| Does it work against the real naive kernel? | **Yes.** A `native-h3` CI artifact negotiates `padding type: Variant1` with the server and moves 50 MB byte-exact (§6.4). |
+| Throughput | **~2.8 MB/s here against 196 MB/s direct.** This host is CPU-bound and the path is loopback, so the number says nothing about a real link -- but the gap is unexplained and is the first thing a production phase must profile (§8). |
 | Is it production-ready? | **Not yet.** The toy server architecture is explicitly not performance-oriented, the connect is unbounded (§6.1), and it has not been run against the real naive kernel. |
 
 ## 8. What this spike does not settle
@@ -259,8 +313,39 @@ next step, not a finding.
   that. Whether it binds depends on RTT.
 - **Throughput.** `quic_server.h` states it is "in no way expected to be
   performant"; the generator-based `quic::QuicServer` + `Http3ServerBackend`
-  architecture is a production-phase choice. Any number measured here is a lower
-  bound.
+  architecture is a production-phase choice.
+
+  What was measured: **~2.8 MB/s through the tunnel against 196 MB/s direct** on
+  the same host and file. That is a wide gap and it is *not* explained yet.
+
+  What can be ruled out as the cause: the client's receive window. On loopback
+  the RTT is ~0.05 ms, so a 15 MiB window permits ~300 GB/s — three orders of
+  magnitude above what was measured. Nor is the host saturated: the server
+  process sat near 36% of one core during a transfer.
+
+  So the gap lives in the tunnel relay path, and the read-chunk experiment is a
+  clue rather than a conclusion: reducing `kReadChunkSize` from 64 KiB to 16 KiB
+  appeared to cut throughput roughly 4x, but restoring it to 65535 did not
+  restore the earlier rate, so that comparison was confounded by first-request
+  effects. The prime suspects are the strict request/response alternation in
+  `ReceiveAsync` (one outstanding read at a time, re-armed through the event
+  loop) and per-chunk overhead in the framer. Profiling the relay is the first
+  task of any production phase.
+
+- **Congestion-control tuning is not a fingerprint, but this host cannot
+  demonstrate its benefit.** BBR's congestion window gain and pacing behaviour
+  are sender-local dynamics applied after the handshake: they change no transport
+  parameter, no frame and no packet layout, so the server-library fingerprint is
+  identical either way. The binary now exposes `--bbr_cwnd_gain`,
+  `--max_congestion_window`, `--lumpy_pacing_size` and
+  `--lumpy_pacing_cwnd_fraction` for that purpose.
+
+  Measured here, tuning them (cwnd gain 2.0 -> 2.5, max cwnd 2000 -> 8000, lumpy
+  burst 2/0.25 -> 8/0.5) made no positive difference: 2.81 MB/s versus a 3.02 MB/s
+  baseline. That is the expected result on a lossless loopback path, where the
+  bottleneck is neither window nor loss. **The tuning surface is correct and the
+  fingerprint argument stands; the measurement to justify a particular setting
+  has to happen on a real path with RTT and loss.**
 - **Statistical traffic analysis.** Xue et al. (USENIX Security 2024) measured
   naiveproxy's padded, multiplexed configuration at TPR 0.32772 at FPR
   0.0544%, using only packet size, timing and direction. Nothing here addresses
