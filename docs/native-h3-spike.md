@@ -402,24 +402,27 @@ The honest balance:
 - **What it does not buy:** throughput; and no reduction in the size/timing
   signal that the published measurement actually detects (§8).
 
-Recommended sequence:
+What remains before a production decision, in order:
 
-1. **Run the end-to-end test against the real patched naive kernel.** The
-   protocol-level client covers the wire contract, but the kernel is the only
-   thing that proves interoperability with the actual client. This is the one
-   remaining gate on the spike's own terms.
-2. **Measure throughput** against `h3frontend` on the same VPS before deciding.
-   §6.1 also requires bounding the connect first: as written, an unreachable
-   upstream stalls the whole server, which is not acceptable in production.
-3. **In parallel and independently, apply the cheap corrections to the Go
+1. **Profile the tunnel relay.** ~2.8 MB/s against 196 MB/s direct is unexplained
+   and is the one number that could veto the whole approach (section 8). Start
+   with the one-outstanding-read-at-a-time pattern in `ReceiveAsync`.
+2. **Bound the connect.** As written, an unreachable upstream blocks the single
+   event-loop thread and takes down every session, not just one tunnel (section
+   6.1). This is a correctness requirement, not an optimisation.
+3. **Measure throughput against `h3frontend` on a real path** with RTT and loss.
+   That is also the only place the congestion-control settings can be justified;
+   on loopback they changed nothing (section 8).
+4. **In parallel and independently, apply the cheap corrections to the Go
    frontend** that the probe already identified: advertise Chrome's window values
    (`6 MiB` / `15 MiB` instead of `8 MiB` / `20 MiB`), send `ack_delay_exponent`,
    stop sending `active_connection_id_limit`, use an 8-byte source connection ID,
    and fix the 404 fallback. These cost nothing and remove every difference that
-   does not require an architecture change. **If the goal is "no
-   implementation fingerprint", this closes most of the measured gap without
-   a rewrite** — but not the `version_information` and order-shuffling
-   differences, which are intrinsic to quic-go.
+   does not require an architecture change. **If the goal is "no implementation
+   fingerprint", this closes most of the measured gap without a rewrite** -- but
+   not the `version_information` and order-shuffling differences, which are
+   intrinsic to quic-go, and those are exactly what a server-library classifier
+   reads.
 
 The strongest argument against a full native rewrite remains §8's first item: the
 client's 15 MiB window, not the server implementation, caps throughput on a long
