@@ -1,0 +1,157 @@
+name: naive-fp
+
+# The fingerprint probe behind docs/native-h3-spike.md. It compares the
+# wire-observable shape of HTTP/3 endpoints -- the transport-parameter set, its
+# encoding order, and its values -- because that is what server-library
+# classifiers such as QUIC Hunter read.
+#
+# The tool builds against a patched apernet/quic-go: stock quic-go discards the
+# parameter encoding order while parsing, and the order is the axis that matters.
+# tools/naive-fp/orderhook/setup.sh materialises that module from the revision
+# this repository already pins, so nothing is fetched from an unpinned branch at
+# build time.
+
+on:
+  push:
+    paths:
+      - "tools/naive-fp/**"
+      - "h3frontend/**"
+      - ".github/workflows/naive-fp.yml"
+  pull_request:
+    paths:
+      - "tools/naive-fp/**"
+      - "h3frontend/**"
+      - ".github/workflows/naive-fp.yml"
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  tool:
+    name: build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+
+      # Materialise the patched quic-go the tool builds against.
+      - name: Prepare the transport-parameter capture hook
+        working-directory: tools/naive-fp
+        run: bash orderhook/setup.sh
+
+      - name: Verify
+        working-directory: tools/naive-fp
+        run: go vet ./...
+
+      - name: Test
+        working-directory: tools/naive-fp
+        run: go test -race ./...
+
+      - name: Build
+        working-directory: tools/naive-fp
+        run: go build -o naive-fp .
+
+      # The diff command is the CI gate, so its exit codes are asserted here
+      # against fixed reports rather than against a live server.
+      - name: Assert the diff gate's exit codes
+        working-directory: tools/naive-fp
+        run: |
+          set -eu
+          if ! ./naive-fp diff testdata/same_a.json testdata/same_b.json; then
+            echo "::error::identical shapes were reported as distinguishable"
+            exit 1
+          fi
+          if ./naive-fp diff testdata/same_a.json testdata/different_b.json; then
+            echo "::error::different shapes were reported as identical"
+            exit 1
+          fi
+          echo "diff gate reports the expected verdicts"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: naive-fp-linux-amd64
+          path: tools/naive-fp/naive-fp
+
+  # End-to-end: stand up the Go H3 frontend, probe it, and record its
+  # transport-parameter shape. This is the reference the native server is
+  # measured against, and the artifact is what makes a future comparison
+  # possible without re-running a VPS benchmark.
+  reference-shape:
+    name: capture the Go frontend's shape
+    runs-on: ubuntu-latest
+    needs: tool
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+
+      - name: Prepare the capture hook
+        working-directory: tools/naive-fp
+        run: bash orderhook/setup.sh
+
+      - name: Build the probe and the frontend
+        run: |
+          set -eu
+          (cd tools/naive-fp && go build -o "$RUNNER_TEMP/naive-fp" .)
+          (cd h3frontend && go build -o "$RUNNER_TEMP/h3frontend" .)
+
+      - name: Start the frontend with a throwaway certificate
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/site"
+          echo "reference shape probe" > "$RUNNER_TEMP/site/index.html"
+          openssl req -x509 -newkey rsa:2048 -nodes \
+            -keyout "$RUNNER_TEMP/key.pem" -out "$RUNNER_TEMP/cert.pem" -days 1 \
+            -subj "/CN=localhost" \
+            -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" 2>/dev/null
+          cat > "$RUNNER_TEMP/h3frontend.toml" <<EOF
+          mode = "origin"
+          listen = "127.0.0.1:8443"
+          log_level = "warn"
+
+          [tls]
+          cert = "$RUNNER_TEMP/cert.pem"
+          key = "$RUNNER_TEMP/key.pem"
+
+          [origin]
+          web_root = "$RUNNER_TEMP/site"
+          username = "user"
+          password = "pass"
+
+          [upstream]
+          addr = "127.0.0.1:18080"
+          EOF
+          "$RUNNER_TEMP/h3frontend" "$RUNNER_TEMP/h3frontend.toml" &
+          for _ in $(seq 1 30); do
+            if "$RUNNER_TEMP/naive-fp" probe -insecure https://127.0.0.1:8443/ \
+                 > "$RUNNER_TEMP/probe.json" 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          test -s "$RUNNER_TEMP/probe.json"
+
+      - name: Report what the probe observed
+        run: |
+          set -eu
+          python3 - "$RUNNER_TEMP/probe.json" <<'PY'
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          ids = [p["id"] for p in d["transport_parameters"]]
+          print("http:", d["http"]["status"], d["http"]["proto"])
+          print("parameters captured:", len(ids))
+          print("encoding order:")
+          for name in ids:
+              print("  -", name)
+          print("version_information present:", "version_information" in ids)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: h3frontend-transport-parameters
+          path: ${{ runner.temp }}/probe.json

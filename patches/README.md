@@ -4,6 +4,14 @@ The default `native-h3` profile uses the upstream Chromium network stack and
 standard TLS. The server is `h3frontend` in `mode="origin"`, with an operator-owned
 certificate and website. See [H3 architecture and migration](../docs/h3-origin.md).
 
+The statements below are about the **naiveproxy client tree** (`src/`). They are
+not a claim about the server: `h3frontend` terminates QUIC with quic-go, and a
+QUIC server's transport-parameter block identifies its implementation. An
+optional native server that removes that difference lives in
+[`h3native/`](../h3native/README.md), and it does modify three QUICHE files --
+see its `patches/`. Measurements and trade-offs are in
+[native H3 spike](../docs/native-h3-spike.md).
+
 | Profile | Patches | Protocol |
 |---|---|---|
 | `native-h3` (default) | 005, 007 | Standard TLS; configuration rejection and initialization fix |

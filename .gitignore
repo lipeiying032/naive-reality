@@ -10,3 +10,5 @@
 /naive.exe
 /upstream/
 /src/
+# h3native: the QUICHE checkout is fetched at build time, not vendored
+/quiche/

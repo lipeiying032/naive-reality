@@ -1,0 +1,94 @@
+--- a/quiche/BUILD.bazel
++++ b/quiche/BUILD.bazel
+@@ -123,6 +123,8 @@
+ 
+ cc_library(
+     name = "quiche_core",
++    # NAIVEREAL_VISIBILITY_PATCH: needed by //naive:naivereal_h3_server.
++    visibility = ["//visibility:public"],
+     srcs = quiche_core_srcs + default_platform_impl_srcs,
+     hdrs = quiche_core_hdrs + default_platform_impl_hdrs,
+     includes = ["common/platform/default"],
+@@ -193,6 +195,8 @@
+ 
+ cc_library(
+     name = "quiche_tool_support",
++    # NAIVEREAL_VISIBILITY_PATCH: needed by //naive:naivereal_h3_server.
++    visibility = ["//visibility:public"],
+     srcs = quiche_tool_support_srcs + default_platform_impl_tool_support_srcs,
+     hdrs = quiche_tool_support_hdrs + default_platform_impl_tool_support_hdrs,
+     includes = ["common/platform/default"],
+@@ -279,6 +283,8 @@
+ 
+ cc_library(
+     name = "quic_toy_server",
++    # NAIVEREAL_VISIBILITY_PATCH: needed by //naive:naivereal_h3_server.
++    visibility = ["//visibility:public"],
+     srcs = [
+         "quic/tools/quic_toy_server.cc",
+     ],
+@@ -296,6 +302,8 @@
+ 
+ cc_library(
+     name = "quic_server_factory",
++    # NAIVEREAL_VISIBILITY_PATCH: needed by //naive:naivereal_h3_server.
++    visibility = ["//visibility:public"],
+     srcs = [
+         "quic/tools/quic_server_factory.cc",
+     ],
+@@ -352,6 +360,8 @@
+ 
+ cc_library(
+     name = "io_tool_support",
++    # NAIVEREAL_VISIBILITY_PATCH: needed by //naive:naivereal_h3_server.
++    visibility = ["//visibility:public"],
+     srcs = io_tool_support_srcs,
+     hdrs = io_tool_support_hdrs,
+     deps = [
+@@ -792,3 +802,46 @@
+     actual = ":quiche_test_support",
+     visibility = ["//visibility:public"],
+ )
++
++# NAIVEREAL_TARGETS_BEGIN
++# The native naive-protocol HTTP/3 server. It lives in this package because the
++# QUICHE tool headers are addressed as "quic/tools/..." inside it. Nothing in
++# QUICHE's own source is modified.
++cc_library(
++    name = "naive_server_backend",
++    srcs = [
++        "naive_posix_client_socket.cc",
++        "naive_server_backend.cc",
++    ],
++    hdrs = [
++        "naive_posix_client_socket.h",
++        "naive_server_backend.h",
++    ],
++    visibility = ["//visibility:public"],
++    deps = [
++        ":io_tool_support",
++        ":quiche_core",
++        ":quiche_tool_support",
++        "@com_google_absl//absl/container:flat_hash_map",
++        "@com_google_absl//absl/status",
++        "@com_google_absl//absl/status:statusor",
++        "@com_google_absl//absl/strings",
++    ],
++)
++
++cc_binary(
++    name = "naivereal_h3_server",
++    srcs = ["naive_h3_server_bin.cc"],
++    visibility = ["//visibility:public"],
++    deps = [
++        ":naive_server_backend",
++        ":io_tool_support",
++        ":quic_server_factory",
++        ":quic_toy_server",
++        ":quiche_core",
++        ":quiche_tool_support",
++        "@com_google_absl//absl/flags:flag",
++        "@com_google_absl//absl/strings",
++    ],
++)
++# NAIVEREAL_TARGETS_END

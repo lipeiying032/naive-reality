@@ -1,0 +1,25 @@
+--- a/MODULE.bazel
++++ b/MODULE.bazel
+@@ -44,11 +44,22 @@
+     urls = ["https://github.com/google/quic-trace/archive/c33abf42245ee56745addc9f1e06f914c48c9ca4.tar.gz"],
+ )
+ 
++# NAIVEREAL_GCC11_PATCH: this checkout ships three [[noreturn]] literal-conversion
++# traps as a static_assert on a literal false, which a conforming pre-C++23 compiler
++# rejects at definition time (GCC 11 here; Chromium builds with a C++23-era
++# clang). The patch makes the assertion depend on the template parameter so it
++# only fires on instantiation, preserving the intended diagnostic.
+ http_archive(
+     name = "com_google_googleurl",
+     sha256 = "d8a701123250e03b3c0865babdfc78540d66374db78f74aafd09bf08545c00bd",  # Last updated 2025-11-25
+     strip_prefix = "gurl-94ff147fe0b96b4cca5d6d316b9af6210c0b8051",
+     urls = ["https://github.com/google/gurl/archive/94ff147fe0b96b4cca5d6d316b9af6210c0b8051.tar.gz"],
++    patch_cmds = [
++        "sed -i 's/static_assert(false,/static_assert(N == 0,/' base/strings/utf_string_conversions.h",
++        # Pre-C++23 libstdc++ has no constexpr string comparison; the
++        # operator only needs to exist, not be constant-evaluable.
++        "sed -i 's/constexpr friend auto operator<=>/friend auto operator<=>/' url/gurl.h",
++    ],
+ )
+ 
+ http_archive(

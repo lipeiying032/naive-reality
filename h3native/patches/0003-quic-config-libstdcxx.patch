@@ -1,0 +1,14 @@
+--- a/quiche/quic/core/quic_config.cc
++++ b/quiche/quic/core/quic_config.cc
+@@ -567,7 +567,10 @@
+ 
+ const QuicTagVector& QuicConfig::ClientRequestedIndependentOptions(
+     Perspective perspective) const {
+-  static constexpr QuicTagVector no_options;
++  // NAIVEREAL_LIBSTDCXX_PATCH: std::vector is not a literal type in
++  // pre-C++23 libstdc++ (GCC < 12), so this cannot be constexpr here.
++  // The value is unchanged: a default-constructed empty vector.
++  static const QuicTagVector no_options;
+   if (perspective == Perspective::IS_SERVER) {
+     return HasReceivedConnectionOptions() ? ReceivedConnectionOptions()
+                                           : no_options;
