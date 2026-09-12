@@ -188,6 +188,57 @@ quic-go enforces it. Since the naive client matches header names
 case-insensitively (`kPaddingHeader = "padding"`), lower-case is both correct and
 compatible. Fixed in the backend; this would have broken every real client.
 
+## 6.3 Found by running the real client: the 407 challenge is mandatory
+
+Running the real naive binary against the native server surfaced a bug that the
+protocol-level test could not, because that test sent credentials on the first
+CONNECT.
+
+The real client issues CONNECT **without** `Proxy-Authorization`, then sends the
+header only after being challenged:
+
+```
+[naive] CONNECT authorized=0 headers: :authority :method proxy-authorization
+        padding padding-type-request accept-encoding user-agent
+[naive] CONNECT authorized=1 ...
+```
+
+The first version of the backend followed the natural reading of "do not reveal
+that a proxy exists" and served an unauthenticated CONNECT as a website request
+(405). That is wrong. `forwardproxy.go` answers with **407 plus
+`Proxy-Authenticate: Basic realm="Caddy Secure Web Proxy"`**, and the client
+depends on it. Without the challenge the client fails with
+`ERR_QUIC_PROTOCOL_ERROR` and never authenticates.
+
+This is worth stating plainly because the "obvious" probe-resistance choice is
+the broken one: the client itself sends CONNECT, so it already knows it is
+talking to a proxy, and the challenge reveals nothing it did not know. The
+backend now challenges, and the trace above shows the client retrying with
+credentials.
+
+**The lesson for the port**: the protocol-level test covers framing and padding,
+but it does not cover the client's actual request sequence. Auth handshakes,
+retry behaviour and error surfacing only appear when the real binary runs.
+
+## 6.4 The real-kernel test is blocked on the kernel profile
+
+The remaining gate — naive kernel against the native server — could not be
+completed, and the reason is a mismatch in the released artifact rather than a
+problem with the server.
+
+`naivereal-kernel-linux-x64.tar.xz` from release 1.3.2 was downloaded and run.
+It **fails identically against the Go `h3frontend`**, which is how the mismatch
+was identified: it is the `tcp-reality` profile build (its `--help` advertises
+`--reality-server-name`, a flag the `native-h3` profile rejects by design), so it
+cannot drive a `quic://` proxy against either server. Both servers answer its
+preamble GET — the Go frontend and the native server each logged and served it —
+and the client then reports `ERR_QUIC_PROTOCOL_ERROR` in both cases.
+
+So this is not evidence against the native server. It does mean the end-to-end
+gate needs a `native-h3` binary, which must be built: roughly 1.5-2 hours of
+Chromium compilation, and the build host here has 1 vCPU / 2 GB. That is the
+next step, not a finding.
+
 ## 7. What the spike establishes
 
 | question | answer |
@@ -196,7 +247,8 @@ compatible. Fixed in the backend; this would have broken every real client.
 | Does a native QUICHE server remove the server-library fingerprint? | **Yes, on every axis measured** — `version_information`, order shuffling, GREASE id length, connection-ID length, payload size, datagram frame size. |
 | Does it fix the client half? | Nothing to fix: the client is already byte-identical to Chrome. |
 | Does it fix throughput? | **No, and it cannot.** See §8. |
-| Does the tunnel work? | **Yes** — CONNECT, per-request auth, padding negotiation in both directions, byte-exact payload, and the fronting invariants (§6). |
+| Does the tunnel work? | **Yes against a protocol-level client** — CONNECT, per-request auth including the 407 retry sequence, padding negotiation in both directions, byte-exact payload (§6, §6.3). |
+| Does it work against the real naive kernel? | **Not yet tested.** The released kernel binary is the `tcp-reality` profile and fails against the Go frontend too (§6.4). A `native-h3` build is required. |
 | Is it production-ready? | **Not yet.** The toy server architecture is explicitly not performance-oriented, the connect is unbounded (§6.1), and it has not been run against the real naive kernel. |
 
 ## 8. What this spike does not settle
