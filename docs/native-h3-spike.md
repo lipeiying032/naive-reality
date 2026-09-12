@@ -285,12 +285,34 @@ the synthetic client and appeared within minutes of running real data.
 ## 6.6 A crash the bulk transfer also exposed
 
 `StatusOr<QuicheMemSlice>` aborted with *"An OK status is not a valid constructor
-argument to StatusOr<T>"* (`absl/status/statusor.cc:79`). `QuicheMemSlice` is
-move-only with several converting constructors, so `return <temporary>` is
-ambiguous enough that absl can select the `Status` constructor.
+argument to StatusOr<T>"* (`absl/status/statusor.cc:79`), killing the whole
+server. It only appeared once a transfer was large enough to need many reads.
 
-Fixed by constructing into the `StatusOr` explicitly with `absl::in_place`. The
-server now survives repeated transfers and a full 50 MB run.
+`QuicheMemSlice` is move-only and takes its value from a `QuicheBuffer`, so
+returning one **directly** from a function whose return type is
+`StatusOr<QuicheMemSlice>` makes absl's overload resolution select
+`StatusOr(Status)` and abort on the OK status.
+
+Two attempts failed before the real cause was clear, and the wrong turn is worth
+recording:
+
+- **`absl::StatusOr<T> result(absl::in_place, std::move(owned));`** — `in_place`
+  selects a **single-argument** constructor, so this compiled while silently
+  dropping the buffer, and the crash came back on the next large transfer.
+  Compiling is not evidence of correctness here.
+- Making the temporary's construction "more explicit" changed nothing, because
+  the ambiguity is in the *return*, not the construction.
+
+The fix is to build the slice as a named value and move it into the `StatusOr`:
+
+```cpp
+quiche::QuicheMemSlice slice(std::move(owned));
+absl::StatusOr<quiche::QuicheMemSlice> result(std::move(slice));
+return result;
+```
+
+Verified afterwards: 3 x 2 MB bulk rounds through the tunnel with zero aborts,
+and a full 50 MB real-kernel transfer with the server still alive.
 
 ## 7. What the spike establishes
 
