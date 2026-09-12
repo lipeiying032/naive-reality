@@ -1,0 +1,48 @@
+--- a/internal/wire/transport_parameters.go
++++ b/internal/wire/transport_parameters.go
+@@ -141,6 +141,7 @@
+ 			return fmt.Errorf("remaining length (%d) smaller than parameter length (%d)", len(b), paramLen)
+ 		}
+ 		parameterIDs = append(parameterIDs, paramID)
++		captureReceivedTransportParameter(paramID, b[:paramLen])
+ 		switch paramID {
+ 		case maxIdleTimeoutParameterID,
+ 			maxUDPPayloadSizeParameterID,
+@@ -599,3 +600,37 @@
+ 	logString += "}"
+ 	return fmt.Sprintf(logString, logParams...)
+ }
++
++// CapturedTransportParameter is one transport parameter as it appeared on the
++// wire, in the order it was encoded. Values are kept as raw bytes so callers can
++// report the exact encoding rather than a re-serialised form.
++type CapturedTransportParameter struct {
++	ID    uint64
++	Value []byte
++}
++
++var capturedReceivedTransportParameters []CapturedTransportParameter
++
++func captureReceivedTransportParameter(id transportParameterID, value []byte) {
++	cp := make([]byte, len(value))
++	copy(cp, value)
++	capturedReceivedTransportParameters = append(capturedReceivedTransportParameters, CapturedTransportParameter{
++		ID:    uint64(id),
++		Value: cp,
++	})
++}
++
++// ResetCapturedReceivedTransportParameters clears the capture buffer. Call it
++// before a handshake whose parameters you want to observe.
++func ResetCapturedReceivedTransportParameters() {
++	capturedReceivedTransportParameters = nil
++}
++
++// CapturedReceivedTransportParameters returns the parameters captured so far, in
++// wire order. This is a fingerprinting-research hook: stock quic-go discards the
++// encoding order while parsing.
++func CapturedReceivedTransportParameters() []CapturedTransportParameter {
++	out := make([]CapturedTransportParameter, len(capturedReceivedTransportParameters))
++	copy(out, capturedReceivedTransportParameters)
++	return out
++}

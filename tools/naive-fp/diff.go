@@ -20,6 +20,14 @@ type diffResult struct {
 	OnlyInB      []string `json:"only_in_b,omitempty"`
 }
 
+// diffExitCode is returned to the shell: 0 when the two endpoints look the same,
+// 1 when they are distinguishable, 2 on usage or I/O failure.
+const (
+	diffSame     = 0
+	diffDistinct = 1
+	diffUsage    = 2
+)
+
 func runDiff(args []string) error {
 	if len(args) != 2 {
 		return fmt.Errorf("diff takes exactly two report files")
@@ -32,25 +40,41 @@ func runDiff(args []string) error {
 	if err != nil {
 		return err
 	}
-	res := compare(a, b)
+	res, code := diffReports(a, b)
 
-	// Human-readable summary on stdout; JSON only when asked.
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(res); err != nil {
+	if err := writeJSON(os.Stdout, res); err != nil {
 		return err
 	}
-	if len(res.Differences) == 0 {
+	switch code {
+	case diffSame:
 		fmt.Fprintln(os.Stderr, "naive-fp: no observable differences")
-		return nil
+	default:
+		fmt.Fprintf(os.Stderr, "naive-fp: %d observable difference(s)\n", len(res.Differences))
+		for _, d := range res.Differences {
+			fmt.Fprintln(os.Stderr, "  -", d)
+		}
 	}
-	fmt.Fprintf(os.Stderr, "naive-fp: %d observable difference(s)\n", len(res.Differences))
-	for _, d := range res.Differences {
-		fmt.Fprintln(os.Stderr, "  -", d)
+	// Non-zero exit makes this usable as a CI gate. Returned rather than exited
+	// so main owns the process exit and this stays testable.
+	if code != diffSame {
+		return exitError{code: code}
 	}
-	// Non-zero exit makes this usable as a CI gate.
-	os.Exit(1)
 	return nil
+}
+
+// exitError carries a specific process exit code up to main.
+type exitError struct{ code int }
+
+func (e exitError) Error() string { return fmt.Sprintf("exit %d", e.code) }
+
+// diffReports is the pure form of the diff command: it compares two reports and
+// reports whether they are distinguishable.
+func diffReports(a, b *report) (diffResult, int) {
+	res := compare(a, b)
+	if len(res.Differences) == 0 {
+		return res, diffSame
+	}
+	return res, diffDistinct
 }
 
 func loadReport(path string) (*report, error) {
@@ -71,6 +95,11 @@ func compare(a, b *report) diffResult {
 	// Order and set are compared after removing parameters whose presence or
 	// placement carries no signal: GREASE (random id by definition) and
 	// per-connection random values. Everything else is shape.
+	//
+	// A value-only difference counts as distinguishable too, so that
+	// SameOrder/SameSet never both read true for endpoints a caller must treat as
+	// different. Reporting it only in Differences would let a CI check that looks
+	// at the booleans pass on a real mismatch.
 	res.SameOrder = order(shapeParams(a)) == order(shapeParams(b))
 	res.SameSet = setOf(shapeParams(a)) == setOf(shapeParams(b))
 
@@ -88,6 +117,7 @@ func compare(a, b *report) diffResult {
 	// Per-parameter values, compared by name so ordering differences do not
 	// mask a value difference.
 	av, bv := valuesByName(a), valuesByName(b)
+	valueDiffers := false
 	for name, va := range av {
 		vb, ok := bv[name]
 		if !ok {
@@ -98,9 +128,15 @@ func compare(a, b *report) diffResult {
 			continue
 		}
 		if va != vb {
+			valueDiffers = true
 			res.Differences = append(res.Differences,
 				fmt.Sprintf("%s differs: A=%s B=%s", name, va, vb))
 		}
+	}
+	if valueDiffers {
+		// Shape is not identical if any shape-bearing value differs.
+		res.SameOrder = false
+		res.SameSet = false
 	}
 
 	for _, kv := range []struct {
@@ -138,13 +174,22 @@ func isGreaseName(name string) bool {
 	return strings.HasPrefix(name, "GREASE(")
 }
 
-// shapeParams keeps the parameters that describe an implementation's shape,
-// dropping GREASE entries.
+// greaseLabel replaces a GREASE parameter's random id.
+//
+// A GREASE id is drawn fresh per connection, so the id itself cannot be compared.
+// Its *presence and position* can, and they are shape: one implementation may
+// always send a GREASE parameter and another may never send one. Collapsing the
+// ids to a single label keeps that signal while removing the per-connection
+// randomness.
+const greaseLabel = "GREASE"
+
+// shapeParams returns the parameters that describe an implementation's shape,
+// with GREASE ids normalised to a single label.
 func shapeParams(r *report) []param {
 	out := make([]param, 0, len(r.TransportParameters))
 	for _, p := range r.TransportParameters {
 		if isGreaseName(p.ID) {
-			continue
+			p.ID = greaseLabel
 		}
 		out = append(out, p)
 	}

@@ -1,0 +1,23 @@
+--- /dev/null
++++ b/fingerprint_hook.go
+@@ -0,0 +1,20 @@
++package quic
++
++import "github.com/apernet/quic-go/internal/wire"
++
++// CapturedTransportParameter is one transport parameter as observed on the wire,
++// in encoding order, with its raw value bytes.
++type CapturedTransportParameter = wire.CapturedTransportParameter
++
++// ResetCapturedTransportParameters clears the capture buffer. Call before the
++// handshake whose parameters you want to observe.
++//
++// This is a fingerprinting-research hook added for tooling that needs the
++// encoding order of a peer's transport parameters, which stock quic-go discards.
++func ResetCapturedTransportParameters() { wire.ResetCapturedReceivedTransportParameters() }
++
++// CapturedTransportParameters returns the transport parameters received so far,
++// in the order they appeared on the wire.
++func CapturedTransportParameters() []CapturedTransportParameter {
++	return wire.CapturedReceivedTransportParameters()
++}

@@ -7,6 +7,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -40,6 +41,10 @@ func main() {
 		os.Exit(2)
 	}
 	if err != nil {
+		var ee exitError
+		if errors.As(err, &ee) {
+			os.Exit(ee.code)
+		}
 		fmt.Fprintln(os.Stderr, "naive-fp:", err)
 		os.Exit(1)
 	}
