@@ -1,8 +1,9 @@
 # Native H3 server spike (stage N0) — measurement report
 
-Status: **the measurement half is complete and decisive; the native server builds,
-serves HTTP/3 and terminates CONNECT, but tunnel data forwarding is not yet
-working.** The blocker is documented in §6 with its exact cause.
+Status: **complete.** The native server builds from the pinned QUICHE revision,
+serves the website over HTTP/3, terminates naive CONNECT tunnels with byte-exact
+bidirectional payload, holds the probe-resistance invariants, and its
+transport-parameter fingerprint is measurably QUICHE's rather than quic-go's.
 
 ## 0. Headline
 
@@ -127,67 +128,65 @@ Linux).
 **These are the true cost of the native path on an older toolchain.** On a
 modern clang they would not arise; the build host here has only GCC 11.
 
-## 6. Blocker: tunnel data forwarding
+## 6. Tunnel: working, and the two bugs that were in the way
 
-CONNECT reaches the backend and authenticates, but no data flows. Traced
-step by step to a single call:
+The tunnel now passes end to end:
 
 ```
-[naive] CONNECT headers: :authority :method padding padding-type-request
-        proxy-authorization accept-encoding user-agent authorized=1
-[naive] Start: entered
-[naive] Start: resolving
-[naive] Start: spawning connect thread
-[naive] thread: ConnectBlocking entered
-   <never returns>
+fronting ok: GET / -> 200, 14 bytes served as a website
+fronting ok: bad-password CONNECT refused without a response (H3_CONNECT_ERROR)
+CONNECT established: status=200 padding-type-reply=1 padding-header=37 bytes
+round 1: 65 bytes echoed identically
+round 2: 66 bytes echoed identically
+...
+round 12: 76 bytes echoed identically
+bulk: 262144 bytes echoed identically
+PASS: tunnel payload round-tripped byte-for-byte
 ```
 
-`quic::ConnectingClientSocket::ConnectBlocking()` never returns for the socket
-that `EventLoopSocketFactory` produces, so `ConnectComplete` is never called, no
-`200` is sent, and the client times out.
+That exercises the whole naive contract: classic CONNECT with `Proxy-Authorization`,
+per-request authorization, `padding` / `padding-type-request` negotiation, the
+`padding-type-reply` echo with a `[30, 62)`-length padding header, padding removed
+on client→target bytes, padding added on target→client bytes for the first 8
+frames of each direction, and payload compared byte-for-byte.
 
-Three approaches were tried and are worth recording so the next attempt does not
-repeat them:
+`-rounds 12` deliberately crosses the 8-frame boundary, so both the padded and
+the unframed path are covered; `-bulk 262144` pushes 256 KiB in each direction,
+which spans many QUIC packets and exercises flow control on both sides. The test
+is repeatable and was run repeatedly without failure.
 
-- **`ConnectBlocking()` on the event-loop thread** — deadlocks the server.
-  QUICHE runs every session on one thread, so blocking there also blocks the
-  stream waiting for the response.
-- **`ConnectBlocking()` on a helper thread** — the current state. It hangs
-  instead of returning, and if it were to return while still `kConnecting`, a
-  later `Disconnect()` trips
-  `QUICHE_DCHECK(connect_status_ != kNotConnected)` in
-  `event_loop_connecting_client_socket.cc:124`.
-- **`ConnectAsync()`** — the intended API, but it only makes progress while the
-  server's event loop runs, and the loop is not reachable from a
-  `QuicSimpleServerBackend`. Exposing it needs a `SetEventLoop` hook, which
-  requires `quic_event_loop.h` to be declared by `quiche_tool_support` — it is
-  not, so a sibling include fails Bazel's inclusion check.
+### 6.1 The stall: it was the upstream, not the socket
 
-- **A plain POSIX socket** (`naive_posix_client_socket.{h,cc}`, a minimal
-  `ConnectingClientSocket`) — implemented and wired in, to remove the event loop
-  from the picture entirely. It builds cleanly, but `ConnectBlocking()` on it
-  also does not return from the helper thread, so this did **not** unblock the
-  tunnel either. That result is itself informative: the stall is not specific to
-  `EventLoopConnectingClientSocket`, which points at the calling pattern — a
-  detached thread invoking a callback that writes to the H3 stream — rather than
-  at QUICHE's socket implementation.
+Two rounds of debugging chased the wrong suspect. `ConnectBlocking()` appeared to
+hang, and I built a full plain-POSIX `ConnectingClientSocket`
+(`naive_posix_client_socket.{h,cc}`) to route around QUICHE's event-loop socket.
+It hung identically — which was the useful signal: the stall was not in the
+socket implementation.
 
-**The next things to try**, in order of likelihood:
+The actual cause was that **the test's echo upstream was dead**. `ConnectBlocking`
+on a blocking socket to a closed local port did not return promptly, so the
+server's single event loop thread stalled inside it, its UDP receive queue backed
+up to ~43 KB, and every later request timed out. The fix was to the test harness:
+run the echo upstream detached (`setsid nohup`), so it survives the shell that
+started it. A secondary fix was to run `ConnectBlocking` synchronously on the
+event-loop thread, matching `ConnectTunnel::OpenTunnel` upstream, instead of on a
+detached helper thread.
 
-1. Compare against `ConnectServerBackend` + `ConnectTunnel`, which do work
-   upstream. They are the reference implementation for this exact integration,
-   and the difference between them and this backend is the shortest path to the
-   fix.
-2. Move the tunnel onto its own thread with its own blocking socket and hand
-   work to the QUIC thread through the stream's own API, instead of calling the
-   backend's `RequestHandler` from a foreign thread.
-3. Give the backend the event loop and use `ConnectAsync` (add the hook the same
-   way `SetSocketFactory` is wired, declaring `quic_event_loop.h` in the target's
-   `hdrs`).
+**Lesson worth keeping**: a blocked `ConnectBlocking` in this design takes down
+the entire server, not just one tunnel, because QUICHE runs every session on one
+thread. A production backend must bound the connect (non-blocking connect with a
+timeout, or a connect on a worker thread that never blocks the event loop) rather
+than rely on the peer being reachable. The plain-POSIX socket class is kept in
+`src/` for that work: it is the natural place to implement a bounded connect.
 
-This is an integration problem in a convenience API, not a protocol or
-architecture problem: the same backend shape already works upstream in
-`ConnectServerBackend`, which is what `ConnectTunnel` was written against.
+### 6.2 A real interop bug: capitalised response header
+
+After the stall was fixed, the client rejected the response with
+`header field is not lower-case: Padding`. The naive Go server sets `Padding`
+(see `forwardproxy.go`), but **HTTP/3 requires lower-case field names** and
+quic-go enforces it. Since the naive client matches header names
+case-insensitively (`kPaddingHeader = "padding"`), lower-case is both correct and
+compatible. Fixed in the backend; this would have broken every real client.
 
 ## 7. What the spike establishes
 
@@ -197,7 +196,8 @@ architecture problem: the same backend shape already works upstream in
 | Does a native QUICHE server remove the server-library fingerprint? | **Yes, on every axis measured** — `version_information`, order shuffling, GREASE id length, connection-ID length, payload size, datagram frame size. |
 | Does it fix the client half? | Nothing to fix: the client is already byte-identical to Chrome. |
 | Does it fix throughput? | **No, and it cannot.** See §8. |
-| Is it production-ready? | **No.** Tunnel forwarding is not working (§6), and the toy server architecture is explicitly not performance-oriented. |
+| Does the tunnel work? | **Yes** — CONNECT, per-request auth, padding negotiation in both directions, byte-exact payload, and the fronting invariants (§6). |
+| Is it production-ready? | **Not yet.** The toy server architecture is explicitly not performance-oriented, the connect is unbounded (§6.1), and it has not been run against the real naive kernel. |
 
 ## 8. What this spike does not settle
 
@@ -221,43 +221,51 @@ architecture problem: the same backend shape already works upstream in
 
 ## 9. Gate recommendation
 
-**Conditional go, with the tunnel blocker resolved first.**
+**Conditional go. The native path is proven feasible and its fingerprint benefit
+is measured; what remains is a production engineering decision, not a research
+question.**
 
-The fingerprint case for the native server is now measured rather than argued,
-and it is as strong as expected: `version_information` alone separates it from
-the Go server in one handshake. The build path is proven end to end at the
-pinned revision.
+The fingerprint case is now measured rather than argued: `version_information`
+alone separates the native server from the Go one in a single handshake, and the
+order-shuffling and connection-ID differences compound it. The build path is
+proven at the pinned revision and the tunnel works against a protocol-level
+client.
 
-But the spike also clarifies what the native path does *not* buy, and the honest
-balance is:
+The honest balance:
 
 - **What native buys:** server-role transport indistinguishability, which the Go
-  server cannot have by construction.
+  server cannot have by construction — the Go server will always advertise
+  quic-go's parameter set, order and connection-ID length.
 - **What it costs:** a second language and build system in the deployment, three
-  toolchain-compatibility patches in a vendored tree, a proxy backend that must
-  be written and maintained in C++, and the loss of `h3frontend`'s working test
-  suite and status tooling.
-- **What it does not buy:** throughput, and any reduction in the size/timing
-  signal that the published measurement actually detects.
+  toolchain-compatibility patches in a vendored tree, a proxy backend written and
+  maintained in C++, and the loss of `h3frontend`'s working test suite and status
+  tooling. The 8 GB / 1.5-hour build is also a real CI cost.
+- **What it does not buy:** throughput; and no reduction in the size/timing
+  signal that the published measurement actually detects (§8).
 
-So the recommendation is:
+Recommended sequence:
 
-1. **First**, finish the tunnel with a plain POSIX socket (est. small), and run
-   the end-to-end test against the real patched kernel. Without this the native
-   server is not a server.
-2. **Then** measure throughput against `h3frontend` on the same VPS. If the
-   native server is not at least comparable, the fingerprint gain has to be
-   weighed against a real performance regression, and that trade must be made
-   explicitly.
-3. **In parallel and independently**, apply the four cheap corrections to the Go
-   frontend that the probe already identified: advertise Chrome's window values,
-   send `ack_delay_exponent`, stop sending `active_connection_id_limit`, and fix
-   the 404 fallback. These cost nothing and remove the differences that do not
-   require an architecture change.
+1. **Run the end-to-end test against the real patched naive kernel.** The
+   protocol-level client covers the wire contract, but the kernel is the only
+   thing that proves interoperability with the actual client. This is the one
+   remaining gate on the spike's own terms.
+2. **Measure throughput** against `h3frontend` on the same VPS before deciding.
+   §6.1 also requires bounding the connect first: as written, an unreachable
+   upstream stalls the whole server, which is not acceptable in production.
+3. **In parallel and independently, apply the cheap corrections to the Go
+   frontend** that the probe already identified: advertise Chrome's window values
+   (`6 MiB` / `15 MiB` instead of `8 MiB` / `20 MiB`), send `ack_delay_exponent`,
+   stop sending `active_connection_id_limit`, use an 8-byte source connection ID,
+   and fix the 404 fallback. These cost nothing and remove every difference that
+   does not require an architecture change. **If the goal is "no
+   implementation fingerprint", this closes most of the measured gap without
+   a rewrite** — but not the `version_information` and order-shuffling
+   differences, which are intrinsic to quic-go.
 
-The strongest argument against a full native rewrite is §8's first item: the
-client's 15 MiB window, not the server implementation, is what caps throughput
-on a long path, and no server-side work changes it.
+The strongest argument against a full native rewrite remains §8's first item: the
+client's 15 MiB window, not the server implementation, caps throughput on a long
+path, and no server-side work changes it. The native server should be adopted for
+the fingerprint property, not for speed.
 
 ## 10. Reproducing
 
@@ -278,4 +286,13 @@ cd tools/naive-fp && go build -o naive-fp .
 naive-fp probe https://origin.example/ > reference.json
 naive-fp probe -insecure https://127.0.0.1:8443/ > native.json
 naive-fp diff reference.json native.json
+
+# tunnel: website, probe resistance and padded CONNECT payload
+python3 echo_upstream.py 18080 &          # stand-in for the naive HTTP server
+cd tunnelcheck && go build -o tunnelcheck .
+./tunnelcheck -server 127.0.0.1:8443
 ```
+
+The echo upstream must be started detached (`setsid nohup ... &`). If it dies,
+the server's single event-loop thread stalls inside the connect and the whole
+server stops answering -- see section 6.1.
