@@ -10,11 +10,14 @@
 # upstream naiveproxy, so it is fetched and patched here instead.
 #
 # Usage:
-#   h3native/build.sh [--dir PATH] [--print-revision]
+#   h3native/build.sh [--dir PATH] [--print-revision] [--print-binary]
 #
-#   --dir PATH        use (or create) this QUICHE checkout instead of a temporary
-#                     one. Pass the checkout you already use for the kernel to
-#                     avoid a second copy.
+#   --dir PATH        use (or create) this QUICHE checkout. Defaults to the
+#                     QUICHE_DIR environment variable, or a "quiche" directory
+#                     beside this repository. Pass the checkout you already use
+#                     for the kernel to avoid a second copy.
+#   --print-binary    print the built binary's path and exit, so CI can locate
+#                     the artifact without duplicating the checkout layout.
 #   --print-revision  print the pinned QUICHE revision and exit.
 set -euo pipefail
 
@@ -22,10 +25,12 @@ script_dir=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$script_dir/.." && pwd)
 
 workdir=""
+print_binary=""
 
 while [ $# -gt 0 ]; do
   case $1 in
     --dir) workdir=$2; shift 2 ;;
+    --print-binary) print_binary=1; shift ;;
     --print-revision) print_revision=1; shift ;;
     -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -66,14 +71,17 @@ if [ -n "${print_revision:-}" ]; then
   exit 0
 fi
 
-echo "Chromium $chromium_version (upstream $upstream_commit) pins QUICHE $quiche_revision"
-
+# One canonical location for the checkout, so --print-binary and the build agree.
 if [ -z "$workdir" ]; then
-  workdir=$(mktemp -d)/quiche
-  cleanup=1
-else
-  cleanup=0
+  workdir=${QUICHE_DIR:-$(cd "$repo/.." && pwd)/quiche}
 fi
+
+if [ -n "$print_binary" ]; then
+  echo "$workdir/bazel-bin/quiche/naivereal_h3_server"
+  exit 0
+fi
+
+echo "Chromium $chromium_version (upstream $upstream_commit) pins QUICHE $quiche_revision"
 
 # The package root inside the QUICHE repository is quiche/, and that is where the
 # server sources must live: they include QUICHE's own headers as "quic/...", which
@@ -133,8 +141,3 @@ echo "    --upstream_addr=127.0.0.1:18080"
 echo
 echo "Congestion control is tunable without changing the wire shape; see"
 echo "--bbr_cwnd_gain, --max_congestion_window and the pacing flags in --help."
-
-if [ "$cleanup" = 1 ]; then
-  echo
-  echo "Note: built in a temporary directory ($workdir); pass --dir to keep it."
-fi

@@ -2,18 +2,27 @@
 
 H3 默认使用 `mode = "origin"`：客户端沿用上游 Chromium QUICHE/BoringSSL，服务端以自有证书完成标准 TLS。网站访问和代理 CONNECT 使用同一个 QUIC/H3 端点，认证在加密后的每个 CONNECT 请求内进行。
 
+服务端有两个可互换的实现，行为契约相同：
+
+| 实现 | 语言 / QUIC 栈 | 状态 |
+|---|---|---|
+| `h3native/` | C++ / QUICHE（与客户端同一实现） | **推荐默认**；服务端不带有 Go 实现独有的传输参数特征 |
+| `h3frontend/` | Go / quic-go | 对照基线与退路；传输参数形状会暴露 quic-go 实现 |
+
+选择理由与实测指纹差异见 [原生 H3 研究](native-h3-spike.md)。原本的"服务端可以不是 Chromium"这一结论仍然成立——Go 服务端在协议层完全正确——但它不是**不可区分**的，而这是本项目的目标，所以默认改成了原生实现。原生服务端仍有未闭合项，部署前务必看 [h3native/README.md](../h3native/README.md) 的 Status。
+
 旧的 `mode = "reality"`、QUIC Initial 预检、第三方 target 中继、借用证书及自定义 HMAC proof 已移除。旧模式不会自动回退成普通 TLS；启动会返回迁移提示。此变更放弃“无需自有域名、借用第三方网站身份”的前提，不承诺流量与任意第三方网站完全一致。
 
 ## 组件与配置
 
 ```text
-原生 Chromium 客户端 ── 标准 QUIC/TLS ── 同一个 Go H3 端点
+原生 Chromium 客户端 ── 标准 QUIC/TLS ── 同一个 H3 端点
                                            ├─ GET/HEAD：自有网站
                                            └─ 每请求 Basic 认证的 CONNECT
                                                 └─ 本地 naive HTTP 服务端
 ```
 
-服务端不需要改为 Chromium。上游 naive 本身只提供本地 HTTP CONNECT，客户端复用 Chrome 网络栈；可对外提供正常网站的成熟服务端也可以使用 Go。本项目继续使用 apernet/quic-go 和 Go TLS，所有访问共用这套服务端实现。
+上游 naive 本身只提供本地 HTTP CONNECT。客户端复用 Chrome 网络栈；服务端可以选择与客户端同源的 QUICHE（推荐），或 Go/quic-go（对照/退路）。两者都对外提供正常网站，所有访问共用同一套端点。
 
 使用 [origin.toml.example](../h3frontend/origin.toml.example) 和 [客户端示例](../h3frontend/native-h3-client.json.example)。必须填写：
 

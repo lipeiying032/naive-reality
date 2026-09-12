@@ -2,14 +2,31 @@ name: h3native
 
 # The native naive H3 server: a QUICHE backend that serves an operator website and
 # terminates naive CONNECT tunnels, so the server half of the connection uses
-# Chrome's QUIC implementation instead of Go's. See docs/native-h3-spike.md.
+# Chrome's QUIC implementation instead of Go's.
+#
+# Why this exists rather than just h3frontend: a QUIC server's
+# transport-parameter block identifies its implementation. Measured with
+# tools/naive-fp, the Go server and a QUICHE server differ on ten properties,
+# including one a single handshake reveals -- QUICHE always sends
+# version_information and shuffles the parameter order; quic-go never does
+# either. See docs/native-h3-spike.md and h3native/README.md.
 #
 # The build is derived from a pinned QUICHE checkout rather than vendored, and it
-# is heavy: QUICHE plus its dependencies is ~1800 compile actions. It therefore
-# runs only on dispatch, not on every pull request. The kernel workflow already
-# builds the same tree, and a future revision can share a cache with it.
+# is heavy: QUICHE plus its dependencies is ~1800 compile actions, which is why
+# the full build is gated behind tags and manual dispatch while a cheap
+# patch-check guards every pull request.
 
 on:
+  # Tags must be their own entry: GitHub ORs `tags` and `paths` within one push
+  # trigger, which would make a tag push that touches no listed path skip the build.
+  push:
+    tags:
+      - "v*"
+      - "[0-9]*.[0-9]*.[0-9]*"
+  pull_request:
+    paths:
+      - "h3native/**"
+      - ".github/workflows/h3native.yml"
   workflow_dispatch:
     inputs:
       run_build:
@@ -18,11 +35,20 @@ on:
         default: true
         type: boolean
 
+permissions:
+  contents: write
+
 defaults:
   run:
     shell: bash
 
+env:
+  # One location for the checkout, shared by the build and the artifact path.
+  QUICHE_DIR: ${{ github.workspace }}/quiche
+
 jobs:
+  # Cheap and runs everywhere: the patches are the source of truth for what this
+  # repository changes inside QUICHE, and this catches drift when the pin moves.
   patch-check:
     name: check the QUICHE patches apply
     runs-on: ubuntu-latest
@@ -41,8 +67,6 @@ jobs:
           git -C quiche fetch --depth 1 origin "${{ steps.rev.outputs.revision }}"
           git -C quiche checkout FETCH_HEAD
 
-      # The patches are the source of truth for what this repository changes in
-      # QUICHE. Checking they apply is cheap and catches drift when the pin moves.
       - name: Apply the h3native patches
         run: |
           set -eu
@@ -52,16 +76,16 @@ jobs:
           done
           echo "all patches apply to ${{ steps.rev.outputs.revision }}"
 
-      - name: Confirm no QUICHE source is modified beyond the patches
+      - name: Confirm no QUICHE source changes beyond the patches
         run: |
           set -eu
           for patch in h3native/patches/[0-9]*.patch; do
             git -C quiche apply "$patch"
           done
-          # Every changed path must come from a patch; nothing may be edited
-          # in place by the build script.
           changed=$(git -C quiche status --porcelain | awk '{print $2}')
           echo "$changed"
+          # Every changed path must come from a patch; the build script must not
+          # edit the tree in place.
           unexpected=$(echo "$changed" | grep -v -E '^(quiche/BUILD\.bazel|MODULE\.bazel|quiche/quic/core/quic_config\.cc)$' || true)
           if [ -n "$unexpected" ]; then
             echo "::error::unexpected QUICHE changes: $unexpected"
@@ -73,34 +97,37 @@ jobs:
     name: build and smoke test
     runs-on: ubuntu-latest
     needs: patch-check
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_build }}
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_build }}
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
 
       - name: Install build prerequisites
         run: |
           set -eu
           sudo apt-get update -qq
           # gurl builds against system ICU on Linux.
-          sudo apt-get install -y -qq libicu-dev
+          sudo apt-get install -y -qq libicu-dev curl git
           go install github.com/bazelbuild/bazelisk@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Cache the Bazel output tree
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.cache/bazel
+          path: ~/.cache/bazel
           key: h3native-bazel-${{ runner.os }}-${{ hashFiles('h3native/patches/*.patch') }}
           restore-keys: h3native-bazel-${{ runner.os }}-
 
       - name: Build
-        run: bash h3native/build.sh --dir "$RUNNER_TEMP/quiche"
+        run: bash h3native/build.sh
 
       - name: Smoke test -- serve a website over HTTP/3
         run: |
           set -eu
-          built="$RUNNER_TEMP/quiche/bazel-bin/quiche/naivereal_h3_server"
+          built=$(bash h3native/build.sh --print-binary)
           test -x "$built"
 
           mkdir -p "$RUNNER_TEMP/site"
@@ -119,8 +146,6 @@ jobs:
           server_pid=$!
           trap 'kill $server_pid 2>/dev/null || true' EXIT
 
-          # Build the probe and check the server answers, and that it advertises
-          # the QUICHE transport-parameter shape the spike measured.
           (cd tools/naive-fp && bash orderhook/setup.sh && go build -o "$RUNNER_TEMP/naive-fp" .)
           for _ in $(seq 1 30); do
             if "$RUNNER_TEMP/naive-fp" probe -insecure https://127.0.0.1:8443/ \
@@ -141,18 +166,25 @@ jobs:
               print("  -", name)
           if d["http"]["status"] != 200:
               sys.exit("the server did not serve the website")
-          # version_information is the property that separates a QUICHE server
-          # from the Go one in a single handshake.
+          # version_information is what separates a QUICHE server from the Go one
+          # in a single handshake; if it is missing the build is not QUICHE-shaped.
           if "version_information" not in ids:
               sys.exit("version_information is missing: this is not QUICHE's shape")
           print("QUICHE transport-parameter shape confirmed")
           PY
 
+      - name: Stage the binary
+        run: |
+          set -eu
+          mkdir -p dist
+          cp "$(bash h3native/build.sh --print-binary)" dist/naivereal-h3native-linux-amd64
+          ls -la dist/
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: naivereal-h3-server-linux-amd64
-          path: ${{ runner.temp }}/quiche/bazel-bin/quiche/naivereal_h3_server
+          name: naivereal-h3native-linux-amd64
+          path: dist/naivereal-h3native-linux-amd64
           if-no-files-found: warn
 
       - uses: actions/upload-artifact@v4
@@ -161,3 +193,19 @@ jobs:
           name: native-transport-parameters
           path: ${{ runner.temp }}/native.json
           if-no-files-found: warn
+
+      # Same tag convention as release-components.yml and build-kernel.yml, so all
+      # components land in one release.
+      - name: Publish to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          release="${{ github.ref_name }}"
+          if ! gh release view "$release" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create "$release" --repo "${{ github.repository }}" \
+              --target "${{ github.sha }}" --title "naivereal $release" \
+              --notes "naivereal $release unified release."
+          fi
+          gh release upload "$release" --repo "${{ github.repository }}" dist/* --clobber

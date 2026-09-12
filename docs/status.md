@@ -1,6 +1,30 @@
 # 当前 H3 状态
 
-H3 已迁移到自有域名/证书的标准 TLS 路线。默认客户端 profile 为 `native-h3`，默认服务端模式为 `origin`。旧 QUIC REALITY 已移除，配置会明确拒绝。实现和迁移见 [h3-origin.md](h3-origin.md)。
+H3 已迁移到自有域名/证书的标准 TLS 路线。默认客户端 profile 为 `native-h3`，默认服务端模式为 `origin`；**默认服务端实现为 `h3native/`（C++/QUICHE）**，`h3frontend/`（Go/quic-go）作为对照基线与退路保留。旧 QUIC REALITY 已移除，配置会明确拒绝。实现和迁移见 [h3-origin.md](h3-origin.md)。
+
+## 为什么默认换成原生服务端
+
+Go 服务端在协议层完全正确，但它**可被识别**：QUIC 服务端的传输参数块会暴露实现。用 `tools/naive-fp` 实测，两者在 10 个属性上不同，其中一条一次握手即可判定——QUICHE 必发 `version_information`(0x11) 并每连接打乱参数顺序，quic-go 两者都不做。QUIC Hunter（PAM 2024）正是靠这一信息识别 18 种服务端库。
+
+完整测量与取舍见 [原生 H3 研究](native-h3-spike.md)。
+
+## 原生服务端未闭合项
+
+**生产部署前必须读 [h3native/README.md](../h3native/README.md) 的 Status 一节。** 摘要：
+
+1. `--upstream_addr` 上游代理模式当前不可用（CONNECT 交换后 QUICHE 的 event-loop socket 在非事件循环线程上打不开描述符，服务端 abort）。
+2. 上游不可达会阻塞唯一的 event-loop 线程，拖垮整个服务端而非一条隧道。
+3. 吞吐未测。同机实测 `h3frontend` 对 Hysteria2 BBR 模式约为三分之一（13.9 vs 41.1 MB/s），原生版的数字尚未取得——不要假定它等于其中任何一个。
+
+## 服务器实测（2026-09-12，198.46.146.78）
+
+同机、同 256 MB 文件、交替各 3 轮、取中位；`h3frontend` + native-h3 内核，HY2 为 `congestion.type: bbr` 且未配 bandwidth（确保非 Brutal）:
+
+- HY2 BBR：**41.1 MB/s**
+- h3frontend：**13.9 MB/s**（≈34%）
+- loopback 直连参照：458 MB/s（说明差距是真实实现差异，不是链路瓶颈）
+
+同一路径从外网客户端测会被客户端带宽压平（直连 3.92、HY2 2.96 MB/s），不可用于对比。
 
 TCP REALITY 前端独立保留；需要该协议时须显式构建 `tcp-reality` 客户端。C++ 补丁应用检查不等于编译通过；本次实际验证记录见研究目录 ROOTFIX-RESULTS.md。
 

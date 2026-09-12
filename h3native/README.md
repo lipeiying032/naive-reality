@@ -1,8 +1,14 @@
 # h3native — the native naive H3 server
 
-A QUICHE backend that serves an operator-owned website and terminates naive
-CONNECT tunnels on one HTTP/3 endpoint, so the **server** half of the connection
-uses Chrome's QUIC implementation instead of Go's.
+**This is the recommended server.** A QUICHE backend that serves an
+operator-owned website and terminates naive CONNECT tunnels on one HTTP/3
+endpoint, so the **server** half of the connection uses Chrome's QUIC
+implementation instead of Go's.
+
+`h3frontend/` remains in the tree as the reference implementation, the
+performance baseline, and a fallback for deployments that cannot carry a C++
+build. It is no longer the default: it terminates QUIC with quic-go, and a QUIC
+server's transport-parameter block identifies its implementation.
 
 ## Why this exists
 
@@ -91,10 +97,28 @@ after the handshake, so they change no transport parameter, no frame and no
 packet layout. What they change is the timing profile, which matters only to
 statistical size/timing analysis. Choose values by measuring on the real path.
 
-## Status
+## Status and known gaps
 
-Spike quality, proven end to end: the real naive kernel negotiates
-`padding type: Variant1` with this server and moves a 50 MB payload
-byte-exact. Not production-ready -- see `docs/native-h3-spike.md` for what
-remains, in particular that an unreachable upstream currently blocks the single
-event-loop thread and stalls the whole server.
+Proven end to end: the real naive kernel negotiates `padding type: Variant1`
+with this server and moves a 50 MB payload byte-exact.
+
+**Not production-ready.** Two gaps are open and both are in the relay, not in
+the protocol:
+
+1. **Upstream mode is broken.** With `--upstream_addr` the tunnel must speak
+   HTTP/1.1 CONNECT to that forward proxy. It does now, but QUICHE's
+   `EventLoopConnectingClientSocket` then fails to open its descriptor when the
+   exchange runs off the event-loop thread, and the server aborts. Use direct
+   dialling (omit `--upstream_addr`) until this is fixed, or fix it with a plain
+   POSIX socket.
+2. **An unreachable upstream stalls the whole server**, not just one tunnel,
+   because QUICHE runs every session on a single thread and the connect blocks
+   it. The connect needs a bound.
+
+**Throughput is unmeasured.** The only numbers gathered so far are invalid: on
+loopback the test client was the bottleneck. `h3frontend` measures 13.9 MB/s
+against Hysteria2's BBR at 41.1 MB/s on the same host, and this server has not
+yet been measured at all -- do not assume it matches either figure.
+
+See `docs/native-h3-spike.md` for the measurements and the full list of what
+remains.
